@@ -5,7 +5,7 @@ use std::fmt;
 
 use eschess_domain::money::AssetId;
 use eschess_ledger::{AccountId, Posting, Side};
-use sqlx::{PgPool, Row};
+use sqlx::{PgExecutor, PgPool, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -78,7 +78,11 @@ impl From<sqlx::Error> for LedgerStoreError {
 
 type Result<T> = std::result::Result<T, LedgerStoreError>;
 
-pub async fn create_account(pool: &PgPool, account: &NewAccount) -> Result<AccountId> {
+/// Works on a pool or inside a transaction, so an account can be created atomically with whatever owns it.
+pub async fn create_account<'e>(
+    db: impl PgExecutor<'e>,
+    account: &NewAccount,
+) -> Result<AccountId> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO ledger_accounts (id, kind, asset, normal_side, allow_negative, owner_id) VALUES ($1,$2,$3,$4,$5,$6)")
         .bind(id)
@@ -87,7 +91,7 @@ pub async fn create_account(pool: &PgPool, account: &NewAccount) -> Result<Accou
         .bind(account.normal_side.as_str())
         .bind(account.allow_negative)
         .bind(account.owner_id)
-        .execute(pool)
+        .execute(db)
         .await?;
     Ok(AccountId(id))
 }

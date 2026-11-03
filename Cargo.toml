@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/domain", "crates/ledger", "crates/storage", "bins/api", "bins/migrate"]
+members = ["crates/domain", "crates/ledger", "crates/auth", "crates/notification", "crates/storage", "bins/api", "bins/migrate"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,7 +19,19 @@ serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 proptest = "1"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 sha2 = "0.10"
 futures = "0.3"
+argon2 = "0.5"
+async-trait = "0.1"
+rand = "0.8"
+hex = "0.4"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "uuid"] }
+
+# Password hashing is deliberately slow; keep it usable in debug builds and tests.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.password-hash]
+opt-level = 3

@@ -8,13 +8,22 @@ publish.workspace = true
 
 [dependencies]
 eschess-domain = { path = "../../crates/domain" }
+eschess-auth = { path = "../../crates/auth" }
+eschess-storage = { path = "../../crates/storage" }
+eschess-notification = { path = "../../crates/notification" }
 axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+eschess-domain = { path = "../../crates/domain" }
+eschess-auth = { path = "../../crates/auth" }
+eschess-ledger = { path = "../../crates/ledger" }
 tower.workspace = true
 http-body-util.workspace = true
+futures.workspace = true

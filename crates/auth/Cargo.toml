@@ -1,0 +1,13 @@
+[package]
+name = "eschess-auth"
+description = "Identity rules: password hashing, token generation, and input validation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
