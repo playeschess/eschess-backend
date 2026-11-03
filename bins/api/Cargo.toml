@@ -1,0 +1,20 @@
+[package]
+name = "eschess-api"
+description = "REST API. Stateless: any instance can serve any request."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eschess-domain = { path = "../../crates/domain" }
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true

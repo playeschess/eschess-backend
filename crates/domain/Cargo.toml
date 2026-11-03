@@ -1,0 +1,12 @@
+[package]
+name = "eschess-domain"
+description = "Pure chess, clock, money and rating rules. No database, network, clock reads or randomness."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
