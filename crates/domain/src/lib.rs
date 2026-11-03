@@ -4,4 +4,6 @@
 //! involving time or chance is passed in by the caller. That is what lets the rules be tested in
 //! milliseconds with no infrastructure, and what makes the move loop easy to reason about.
 //!
-//! Modules arrive one at a time (money, then clock, chess and rating).
+//! Modules arrive one at a time: `money` first, then clock, chess and rating.
+
+pub mod money;
