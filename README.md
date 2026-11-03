@@ -4,7 +4,8 @@ Rust backend for eSchess. The architecture is in [eschess-docs](https://github.c
 
 ```
 crates/domain   pure rules: money, clock, chess, rating (no I/O)
-crates/storage  PostgreSQL access and migrations
+crates/ledger   double-entry postings and idempotency keys (pure, no database)
+crates/storage  PostgreSQL access: migrations and the ledger repository
 bins/api        REST API
 bins/migrate    applies database migrations
 migrations/     forward-only SQL migrations
