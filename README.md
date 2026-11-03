@@ -4,7 +4,10 @@ Rust backend for eSchess. The architecture is in [eschess-docs](https://github.c
 
 ```
 crates/domain   pure rules: money, clock, chess, rating (no I/O)
+crates/storage  PostgreSQL access and migrations
 bins/api        REST API
+bins/migrate    applies database migrations
+migrations/     forward-only SQL migrations
 ```
 
 More crates and binaries (ledger, storage, game, realtime, worker ...) are added step by step, following the
@@ -13,7 +16,14 @@ build order in the architecture document.
 ## Everyday commands
 
 ```
-make run     # start the API, then: curl localhost:8080/health
-make test    # all tests
-make lint    # formatting and clippy, exactly what CI checks
+make dev               # start Postgres in Docker (needs Docker)
+make migrate           # create/update the database tables
+make run               # start the API, then: curl localhost:8080/health
+make test              # unit tests, no database needed
+make test-integration  # tests that use the local Postgres
+make lint              # formatting and clippy, exactly what CI checks
+make psql              # a SQL prompt on the local database
+make dev-down          # stop Postgres (its data is kept)
 ```
+
+From an empty machine: `make dev && make migrate && make test-integration`.

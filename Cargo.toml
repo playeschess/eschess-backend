@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/domain", "bins/api"]
+members = ["crates/domain", "crates/storage", "bins/api", "bins/migrate"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,3 +19,4 @@ serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 proptest = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }

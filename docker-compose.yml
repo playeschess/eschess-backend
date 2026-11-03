@@ -1,0 +1,21 @@
+# Local development services. `make dev` starts them, `make dev-down` stops them.
+# Credentials here are for a throwaway local database only; nothing real ever uses them.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: eschess
+      POSTGRES_PASSWORD: eschess
+      POSTGRES_DB: eschess
+    ports:
+      - "127.0.0.1:5440:5432"
+    volumes:
+      - eschess-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eschess -d eschess"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  eschess-pg:
