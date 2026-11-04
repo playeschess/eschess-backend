@@ -10,6 +10,8 @@ use eschess_domain::chess::{Color, Move, Position};
 use eschess_domain::clock::{Clock, ClockState, LagPolicy, TimeControl};
 use eschess_game::{ActiveGame, Ended, MoveOutcome, Refusal};
 use sqlx::{PgConnection, PgPool, Row};
+
+use crate::ratings;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -242,6 +244,38 @@ async fn finish(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
         .bind(ended.reason.as_str())
         .execute(&mut *db)
         .await?;
+    rate(db, id, ended).await
+}
+
+/// Updates both players' ratings for a finished game, if it was played enough to count.
+async fn rate(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
+    let r = sqlx::query(
+        "SELECT white_id, black_id, ply, base_ms, increment_ms FROM games WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *db)
+    .await?;
+    if r.get::<i32, _>("ply") < ratings::MIN_PLIES_FOR_RATING {
+        return Ok(());
+    }
+    let (Some(white), Some(black)) = (
+        r.get::<Option<Uuid>, _>("white_id"),
+        r.get::<Option<Uuid>, _>("black_id"),
+    ) else {
+        return Ok(());
+    };
+    let Ok(control) = TimeControl::new(
+        r.get::<i64, _>("base_ms") as u64,
+        r.get::<i64, _>("increment_ms") as u64,
+    ) else {
+        return Ok(());
+    };
+    let score = match ended.result {
+        eschess_game::GameResult::White => 1.0,
+        eschess_game::GameResult::Draw => 0.5,
+        eschess_game::GameResult::Black => 0.0,
+    };
+    ratings::apply_game(db, id, control.category().as_str(), white, black, score).await?;
     Ok(())
 }
 
