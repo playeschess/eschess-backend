@@ -35,3 +35,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.password-hash]
 opt-level = 3
+
+# The chess rules are pure and CPU-bound, and their tests count millions of positions; optimise them even in
+# debug builds so the tests run in seconds.
+[profile.dev.package.eschess-domain]
+opt-level = 3

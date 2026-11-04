@@ -3,7 +3,7 @@
 Rust backend for eSchess. The architecture is in [eschess-docs](https://github.com/playeschess/eschess-docs).
 
 ```
-crates/domain   pure rules: money, clock, chess, rating (no I/O)
+crates/domain   pure rules: money, chess (clock and rating to come); no I/O
 crates/notification  sending email (log, in-memory for tests, or any SMTP provider)
 crates/auth     password hashing, tokens, input validation (no database)
 crates/ledger   double-entry postings and idempotency keys (pure, no database)
@@ -60,3 +60,13 @@ hashes. Set `SMTP_URL` and `MAIL_FROM` to use a real provider (see `.env.example
 
 Try it locally without a mail server: set `DEV_PRINT_EMAIL_TOKENS=true` in `.env`, run `make dev && make migrate && make run`,
 sign up, and read the token from the server log.
+
+## Chess rules (crates/domain)
+
+`chess::Game` plays moves in UCI notation (`e2e4`, `e7e8q`), refuses illegal ones, and reports how a game ended by the
+rules alone: checkmate, stalemate, insufficient material, fivefold repetition, the 75-move rule, plus the draws a player
+may claim (threefold repetition, the 50-move rule). Resignation, flag fall and agreed draws belong to the game service.
+
+Correctness is checked three ways: the published "perft" counts for six famous tricky positions (about 11 million
+positions), thousands of random positions compared one by one against the independent `python-chess` library
+(`crates/domain/tests/data/`, regenerate with the script there), and ordinary unit tests for each rule.

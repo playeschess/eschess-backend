@@ -6,4 +6,5 @@
 //!
 //! Modules arrive one at a time: `money` first, then clock, chess and rating.
 
+pub mod chess;
 pub mod money;

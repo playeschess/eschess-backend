@@ -78,7 +78,11 @@ emailed_token() {
 # ---------------------------------------------------------------- start everything
 
 bold "Starting Postgres, the migrations and the API"
-docker compose up -d --wait >/dev/null 2>&1 || { echo "Could not start Postgres. Is Docker running?"; exit 2; }
+if ! docker compose up -d --wait >/dev/null 2>&1; then
+  echo "Postgres would not start; recreating it (local dev data is discarded)"
+  docker compose down -v >/dev/null 2>&1
+  docker compose up -d --wait >/dev/null 2>&1 || { echo "Could not start Postgres. Is Docker running?"; exit 2; }
+fi
 cargo run -q -p eschess-migrate >/dev/null || { echo "Migrations failed."; exit 2; }
 cargo build -q -p eschess-api || { echo "Build failed."; exit 2; }
 BIND="127.0.0.1:$PORT" DEV_PRINT_EMAIL_TOKENS=true target/debug/eschess-api >"$LOG" 2>&1 &

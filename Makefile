@@ -27,7 +27,9 @@ lint:  ## the same checks CI runs
 check: lint test
 
 dev:   ## start local services (Postgres) and wait until they are ready
-	docker compose up -d --wait
+	@# If a stopped container will not restart (this happens in some Codespaces after a restart), recreate it.
+	@# The local database holds only throwaway development data, so nothing of value is lost.
+	docker compose up -d --wait || { echo "Postgres would not start; recreating it (local dev data is discarded)"; docker compose down -v && docker compose up -d --wait; }
 
 dev-down:  ## stop local services (add -v to also delete the data)
 	docker compose down
