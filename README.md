@@ -22,6 +22,7 @@ build order in the architecture document.
 make dev               # start Postgres in Docker (needs Docker)
 make migrate           # create/update the database tables
 make run               # start the API, then: curl localhost:8080/health
+make try               # start everything and try every endpoint end to end, reporting what passed
 make test              # unit tests, no database needed
 make test-integration  # tests that use the local Postgres
 make lint              # formatting and clippy, exactly what CI checks

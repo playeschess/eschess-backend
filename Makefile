@@ -3,10 +3,13 @@
 DATABASE_URL ?= postgres://eschess:eschess@127.0.0.1:5440/eschess
 export DATABASE_URL
 
-.PHONY: run test test-integration fmt lint check dev dev-down migrate psql
+.PHONY: run try test test-integration fmt lint check dev dev-down migrate psql
 
 run:   ## start the API on 127.0.0.1:8080
 	cargo run -p eschess-api
+
+try:   ## start the API and try every endpoint end to end (starts Postgres too)
+	./scripts/try-api.sh
 
 test:  ## unit tests: no database or other services needed
 	cargo test --workspace
