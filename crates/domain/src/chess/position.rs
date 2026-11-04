@@ -393,6 +393,54 @@ impl Position {
     }
 }
 
+impl Position {
+    /// Can `color` never checkmate in this position, whatever the opponent does? (FIDE Article 6.9: when a player's
+    /// time runs out but the opponent could not possibly checkmate, the game is a draw, not a win on time.)
+    ///
+    /// Stricter than [`insufficient_material`](Position::insufficient_material), which asks about both sides at once:
+    /// here the opponent may still have pieces that could help *them* be mated.
+    pub fn cannot_checkmate(&self, color: Color) -> bool {
+        let (mut own_total, mut own_knights, mut own_bishops) = (0, 0, 0);
+        let (mut light_bishops, mut dark_bishops) = (0, 0);
+        let (mut any_pawn, mut any_knight) = (false, false);
+        let mut opponent_has_helpers = false; // pawns, knights, bishops or rooks
+        for s in Square::all() {
+            let Some(p) = self.piece_at(s) else { continue };
+            any_pawn |= p.kind == PieceKind::Pawn;
+            any_knight |= p.kind == PieceKind::Knight;
+            if p.kind == PieceKind::Bishop {
+                if s.is_light() {
+                    light_bishops += 1;
+                } else {
+                    dark_bishops += 1;
+                }
+            }
+            if p.color == color {
+                own_total += 1;
+                match p.kind {
+                    PieceKind::Pawn | PieceKind::Rook | PieceKind::Queen => return false,
+                    PieceKind::Knight => own_knights += 1,
+                    PieceKind::Bishop => own_bishops += 1,
+                    PieceKind::King => {}
+                }
+            } else if !matches!(p.kind, PieceKind::King | PieceKind::Queen) {
+                opponent_has_helpers = true;
+            }
+        }
+        if own_knights > 0 {
+            // A lone knight cannot mate, unless the opponent has pieces of their own that it could be mated against.
+            return own_total <= 2 && !opponent_has_helpers;
+        }
+        if own_bishops > 0 {
+            // Bishops cannot mate if they all share a colour (counting the opponent's bishops too) and nothing else
+            // on the board can block or help.
+            let same_colour = light_bishops == 0 || dark_bishops == 0;
+            return same_colour && !any_pawn && !any_knight;
+        }
+        true
+    }
+}
+
 /// Counts the leaf positions reachable in exactly `depth` moves. The numbers for well-known positions are
 /// published, so matching them is strong evidence that move generation is right.
 pub fn perft(position: &Position, depth: u32) -> u64 {

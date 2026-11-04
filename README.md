@@ -3,7 +3,7 @@
 Rust backend for eSchess. The architecture is in [eschess-docs](https://github.com/playeschess/eschess-docs).
 
 ```
-crates/domain   pure rules: money, chess (clock and rating to come); no I/O
+crates/domain   pure rules: money, chess, game clock (rating to come); no I/O
 crates/notification  sending email (log, in-memory for tests, or any SMTP provider)
 crates/auth     password hashing, tokens, input validation (no database)
 crates/ledger   double-entry postings and idempotency keys (pure, no database)
@@ -70,3 +70,14 @@ may claim (threefold repetition, the 50-move rule). Resignation, flag fall and a
 Correctness is checked three ways: the published "perft" counts for six famous tricky positions (about 11 million
 positions), thousands of random positions compared one by one against the independent `python-chess` library
 (`crates/domain/tests/data/`, regenerate with the script there), and ordinary unit tests for each rule.
+
+## Game clock (crates/domain)
+
+`clock::Clock` is a Fischer clock (base time plus an increment per move) written as pure arithmetic on millisecond
+timestamps the caller supplies, so it can be rebuilt from stored values after a restart (`Clock::state` and
+`Clock::from_state`). **Lag credit:** the server measures a player's network lag and refunds part of it, but never more
+than the time actually spent, never more than a per-move cap, and only from a small quota that refills slowly, so a
+player who claims lag on every move gains almost nothing. A timer should use `flagged_at`, which waits out the refund
+a move still in flight could be owed. The numbers are in `LagPolicy::default()` and are starting values to be checked
+against the product requirements (PRD section 9, F-17). `Game::flag_result` applies the FIDE rule that running out of
+time is a draw, not a loss, when the opponent could never checkmate.

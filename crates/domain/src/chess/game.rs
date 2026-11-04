@@ -30,6 +30,15 @@ pub enum ClaimableDraw {
     FiftyMoveRule,
 }
 
+/// What happens when a player's time runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagResult {
+    /// The player whose time ran out loses.
+    Loses(Color),
+    /// The opponent could not checkmate by any series of legal moves, so the game is drawn.
+    Draw,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
     /// The game is already over.
@@ -166,6 +175,15 @@ impl Game {
             Some(ClaimableDraw::FiftyMoveRule)
         } else {
             None
+        }
+    }
+
+    /// The result when `flagged` runs out of time: a loss, unless the opponent has no way to checkmate.
+    pub fn flag_result(&self, flagged: Color) -> FlagResult {
+        if self.position.cannot_checkmate(flagged.opposite()) {
+            FlagResult::Draw
+        } else {
+            FlagResult::Loses(flagged)
         }
     }
 
