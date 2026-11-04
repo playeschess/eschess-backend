@@ -19,24 +19,44 @@ pub const PASSWORD: &str = "correct horse battery";
 pub struct Api {
     pub app: Router,
     pub pool: PgPool,
+    pub state: AppState,
 }
 
 impl Api {
     pub fn new(pool: PgPool) -> Api {
+        Api::with_config(pool, Config::default())
+    }
+
+    pub fn with_config(pool: PgPool, config: Config) -> Api {
         let state = AppState {
             pool: pool.clone(),
-            config: Arc::new(Config::default()),
+            config: Arc::new(config),
             mailer: Arc::new(CapturingMailer::default()),
+            hub: eschess_api::hub::Hub::new(),
         };
         Api {
-            app: app(state),
+            app: app(state.clone()),
             pool,
+            state,
         }
+    }
+
+    /// Starts a real HTTP and WebSocket server on a free local port, as one server process would, with its own list of
+    /// connected players and its own listener for game changes. Returns its address.
+    pub async fn serve(&self) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        eschess_api::hub::spawn_listener(self.state.hub.clone(), self.pool.clone());
+        let router = self.app.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
     }
 
     /// Another server process over the same database: all game state lives there, so it can carry on any game.
     pub fn another_server(&self) -> Api {
-        Api::new(self.pool.clone())
+        Api::with_config(self.pool.clone(), (*self.state.config).clone())
     }
 
     pub async fn call(

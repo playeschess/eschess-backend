@@ -43,17 +43,18 @@ async fn main() {
         .await
         .expect("cannot bind");
     tracing::info!("eschess-api listening on {bind}");
-    axum::serve(
-        listener,
-        app(AppState {
-            pool,
-            config: Arc::new(config),
-            mailer,
-        }),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await
-    .expect("server error");
+    let state = AppState {
+        pool,
+        config: Arc::new(config),
+        mailer,
+        hub: eschess_api::hub::Hub::new(),
+    };
+    // Listen for game changes made by any server, and push them to the players connected to this one.
+    eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown())
+        .await
+        .expect("server error");
 }
 
 async fn shutdown() {

@@ -9,7 +9,9 @@ use sqlx::PgPool;
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod hub;
 pub mod routes;
+pub mod ws;
 
 pub use config::Config;
 
@@ -18,6 +20,8 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub mailer: Arc<dyn Mailer>,
+    /// Who is connected over WebSocket and watching which game.
+    pub hub: hub::Hub,
 }
 
 /// The API's routes. Kept separate from `main` so tests can call it without opening a network port.
@@ -47,6 +51,7 @@ pub fn app(state: AppState) -> Router {
             delete(routes::auth::revoke_session),
         )
         .route("/v1/me", get(routes::me::me))
+        .route("/v1/ws", get(ws::upgrade))
         .route(
             "/v1/games",
             get(routes::games::list).post(routes::games::create),
@@ -82,6 +87,7 @@ mod tests {
             mailer: Arc::new(eschess_notification::LogMailer {
                 print_tokens: false,
             }),
+            hub: hub::Hub::new(),
         }
     }
 

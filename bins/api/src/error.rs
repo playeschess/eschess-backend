@@ -27,9 +27,11 @@ impl ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, code, message) = match self {
+impl ApiError {
+    /// The HTTP status, stable error code and message for this error. REST replies with all three; the WebSocket
+    /// route reports the code and message.
+    pub fn parts(self) -> (StatusCode, &'static str, String) {
+        match self {
             ApiError::Validation(m) => (StatusCode::BAD_REQUEST, "validation_failed", m),
             ApiError::Coded(status, code, message) => (status, code, message),
             ApiError::InvalidToken => (
@@ -82,7 +84,13 @@ impl IntoResponse for ApiError {
                     "something went wrong".into(),
                 )
             }
-        };
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = self.parts();
         (
             status,
             Json(json!({ "error": { "code": code, "message": message } })),
@@ -123,6 +131,10 @@ impl From<eschess_storage::games::GameError> for ApiError {
             NotFound => ApiError::NotFound,
             NotOpen => conflict("game_not_open", "that game is not open for joining"),
             OwnGame => conflict("own_game", "you cannot join your own game"),
+            TooManyOpenGames => conflict(
+                "too_many_open_games",
+                "you already have the most open games allowed; cancel one or wait for an opponent",
+            ),
             NotStarted => conflict(
                 "game_not_started",
                 "the game has not started: it is waiting for an opponent",

@@ -32,7 +32,7 @@ fn category_name(c: Category) -> &'static str {
     }
 }
 
-fn game_json(g: &GameView) -> Value {
+pub(crate) fn game_json(g: &GameView) -> Value {
     let category = TimeControl::new(g.base_ms as u64, g.increment_ms as u64)
         .map(|t| category_name(t.category()));
     json!({
@@ -41,7 +41,7 @@ fn game_json(g: &GameView) -> Value {
         "time_control": { "base_ms": g.base_ms, "increment_ms": g.increment_ms, "category": category.ok() },
         "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
         "clock": { "white_ms": g.white_ms, "black_ms": g.black_ms, "as_of_ms": g.as_of_ms },
-        "result": g.result, "end_reason": g.end_reason, "legal_moves": g.legal_moves,
+        "result": g.result, "end_reason": g.end_reason, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
     })
 }
 
@@ -174,6 +174,7 @@ pub async fn play_move(
         user.user_id,
         b.uci.trim(),
         b.client_move_id,
+        0, // plain HTTP offers no way to measure lag, so no refund; the WebSocket route measures it
     )
     .await?;
     Ok(Json(

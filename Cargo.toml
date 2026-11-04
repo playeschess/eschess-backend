@@ -10,7 +10,7 @@ publish = false
 
 # One place for dependency versions, so every crate agrees.
 [workspace.dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

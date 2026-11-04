@@ -20,6 +20,8 @@ pub enum GameError {
     NotOpen,
     /// Joining your own game.
     OwnGame,
+    /// The creator already has the most open games a player may have.
+    TooManyOpenGames,
     /// Moving in a game that is still waiting for an opponent.
     NotStarted,
     /// The player's app reused a `client_move_id` for a different move.
@@ -36,6 +38,9 @@ impl fmt::Display for GameError {
             GameError::NotFound => write!(f, "game not found"),
             GameError::NotOpen => write!(f, "that game is not open"),
             GameError::OwnGame => write!(f, "you cannot join your own game"),
+            GameError::TooManyOpenGames => {
+                write!(f, "you already have {MAX_OPEN_GAMES} open games")
+            }
             GameError::NotStarted => {
                 write!(f, "the game has not started: it is waiting for an opponent")
             }
@@ -64,6 +69,9 @@ impl From<Refusal> for GameError {
     }
 }
 
+/// The most games one player may have open (waiting for an opponent) at a time, so nobody can fill the lobby.
+pub const MAX_OPEN_GAMES: i64 = 3;
+
 type Result<T> = std::result::Result<T, GameError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +93,8 @@ pub struct GameView {
     pub increment_ms: i64,
     pub fen: String,
     pub ply: i32,
+    /// Goes up by one on every change to the game. A client that sees a gap has missed an update.
+    pub event_seq: i32,
     pub moves: Vec<String>,
     /// Whose turn it is ("white" or "black"), while the game is being played.
     pub turn: Option<&'static str>,
@@ -122,12 +132,13 @@ struct GameRow {
     end_reason: Option<String>,
     fen: String,
     ply: i32,
+    event_seq: i32,
     remaining: [i64; 2],
     quota: [i64; 2],
     turn_started_at_ms: Option<i64>,
 }
 
-const COLS: &str = "id, created_by, color_preference, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms";
+const COLS: &str = "id, created_by, color_preference, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
@@ -143,6 +154,7 @@ fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
         end_reason: r.get("end_reason"),
         fen: r.get("fen"),
         ply: r.get("ply"),
+        event_seq: r.get("event_seq"),
         remaining: [r.get("white_remaining_ms"), r.get("black_remaining_ms")],
         quota: [r.get("white_lag_quota_ms"), r.get("black_lag_quota_ms")],
         turn_started_at_ms: r.get("turn_started_at_ms"),
@@ -212,8 +224,19 @@ fn active_game(row: &GameRow, moves: &[String]) -> Result<ActiveGame> {
     })
 }
 
+/// Tells every server (and so every connected player) that this game has changed. Postgres delivers the notification
+/// when the transaction commits, so it is sent if and only if the change really happened.
+async fn notify(db: &mut PgConnection, id: Uuid) -> Result<()> {
+    sqlx::query("SELECT pg_notify('game_events', $1)")
+        .bind(id.to_string())
+        .execute(&mut *db)
+        .await?;
+    Ok(())
+}
+
 async fn finish(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
-    sqlx::query("UPDATE games SET status = 'finished', result = $2, end_reason = $3, ended_at = now() WHERE id = $1 AND status = 'active'")
+    notify(db, id).await?;
+    sqlx::query("UPDATE games SET status = 'finished', result = $2, end_reason = $3, ended_at = now(), event_seq = event_seq + 1 WHERE id = $1 AND status = 'active'")
         .bind(id)
         .bind(ended.result.as_str())
         .bind(ended.reason.as_str())
@@ -304,6 +327,7 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
         increment_ms: row.increment_ms,
         fen: row.fen.clone(),
         ply: row.ply,
+        event_seq: row.event_seq,
         moves,
         turn,
         white_ms,
@@ -315,7 +339,7 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
     })
 }
 
-/// Opens a game for someone to join. The colours are decided when they do.
+/// Opens a game for someone to join. The colours are decided when they do. A player may have only a few open at once.
 pub async fn create_game(
     pool: &PgPool,
     creator: Uuid,
@@ -326,6 +350,21 @@ pub async fn create_game(
     let control = TimeControl::new(base_ms, increment_ms).map_err(|_| GameError::InvalidTimeControl("the base time must be between 1 second and 3 hours and the increment at most 3 minutes"))?;
     let id = Uuid::now_v7();
     let clock = Clock::start(control, LagPolicy::default(), 0).state();
+    let mut tx = pool.begin().await?;
+    // Two requests from one player at the same moment must not both slip under the limit.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("open-games:{creator}"))
+        .execute(&mut *tx)
+        .await?;
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM games WHERE created_by = $1 AND status = 'waiting'",
+    )
+    .bind(creator)
+    .fetch_one(&mut *tx)
+    .await?;
+    if open >= MAX_OPEN_GAMES {
+        return Err(GameError::TooManyOpenGames);
+    }
     sqlx::query(
         "INSERT INTO games (id, created_by, color_preference, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
@@ -340,8 +379,9 @@ pub async fn create_game(
     .bind(clock.remaining_ms[1] as i64)
     .bind(clock.lag_quota_ms[0] as i64)
     .bind(clock.lag_quota_ms[1] as i64)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -432,7 +472,7 @@ pub async fn join_game(
     let clock = Clock::start(control, LagPolicy::default(), now as u64).state();
     sqlx::query(
         "UPDATE games SET status = 'active', white_id = $2, black_id = $3, started_at = now(), turn_started_at_ms = $4,
-             white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8
+             white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8, event_seq = event_seq + 1
          WHERE id = $1",
     )
     .bind(id)
@@ -445,6 +485,7 @@ pub async fn join_game(
     .bind(clock.lag_quota_ms[1] as i64)
     .execute(&mut *tx)
     .await?;
+    notify(&mut tx, id).await?;
     tx.commit().await?;
     let mut conn = pool.acquire().await?;
     view(&mut conn, id, joiner).await
@@ -460,10 +501,11 @@ pub async fn cancel_game(pool: &PgPool, id: Uuid, creator: Uuid) -> Result<()> {
     if row.status != "waiting" {
         return Err(GameError::NotOpen);
     }
-    sqlx::query("UPDATE games SET status = 'cancelled' WHERE id = $1")
+    sqlx::query("UPDATE games SET status = 'cancelled', event_seq = event_seq + 1 WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    notify(&mut tx, id).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -497,6 +539,7 @@ pub async fn play_move(
     actor: Uuid,
     uci: &str,
     client_move_id: Uuid,
+    measured_lag_ms: u64,
 ) -> Result<(GameView, MoveReceipt)> {
     let mut tx = pool.begin().await?;
     let (row, moves, now) = lock_for_player(&mut tx, id, actor).await?;
@@ -526,8 +569,9 @@ pub async fn play_move(
     }
 
     let game = active_game(&row, &moves)?;
-    // No lag measurement over plain HTTP yet, so no refund: the full time is charged.
-    match eschess_game::play_move(&game, actor, uci, now as u64, 0)? {
+    // `measured_lag_ms` is what the server itself measured for this player's connection (0 over plain HTTP, which
+    // offers no way to measure it): the clock refunds part of it, within its caps and quota.
+    match eschess_game::play_move(&game, actor, uci, now as u64, measured_lag_ms)? {
         MoveOutcome::Flagged(ended) => {
             finish(&mut tx, id, ended).await?;
             tx.commit().await?;
@@ -551,7 +595,7 @@ pub async fn play_move(
                 .execute(&mut *tx)
                 .await?;
             sqlx::query(
-                "UPDATE games SET fen = $2, ply = $3, white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, turn_started_at_ms = $8 WHERE id = $1",
+                "UPDATE games SET fen = $2, ply = $3, white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, turn_started_at_ms = $8, event_seq = event_seq + 1 WHERE id = $1",
             )
             .bind(id)
             .bind(&applied.fen_after)
@@ -563,6 +607,7 @@ pub async fn play_move(
             .bind(state.turn_started_at_ms as i64)
             .execute(&mut *tx)
             .await?;
+            notify(&mut tx, id).await?;
             if let Some(ended) = applied.ended {
                 finish(&mut tx, id, ended).await?;
             }
@@ -613,4 +658,27 @@ pub async fn resign(pool: &PgPool, id: Uuid, actor: Uuid) -> Result<GameView> {
 
 pub async fn claim_draw(pool: &PgPool, id: Uuid, actor: Uuid) -> Result<GameView> {
     end_by_player(pool, id, actor, eschess_game::claim_draw).await
+}
+
+/// A read-only look at a game as `viewer` may see it. Unlike [`get_game`] it never changes anything, so it is cheap and
+/// safe to call often (live updates, clock syncs).
+pub async fn peek_game(pool: &PgPool, id: Uuid, viewer: Uuid) -> Result<GameView> {
+    let mut conn = pool.acquire().await?;
+    view(&mut conn, id, viewer).await
+}
+
+/// Has the player to move in this game run out of time, with nothing left that could save a move in flight? A cheap
+/// check for a timer; if it says yes, call [`get_game`], which settles the game.
+pub async fn flag_due(pool: &PgPool, id: Uuid) -> Result<bool> {
+    let due: Option<bool> = sqlx::query_scalar(
+        "SELECT (extract(epoch from clock_timestamp()) * 1000)::bigint >=
+                turn_started_at_ms + CASE WHEN ply % 2 = 0 THEN white_remaining_ms ELSE black_remaining_ms END
+                + LEAST($2::bigint, CASE WHEN ply % 2 = 0 THEN white_lag_quota_ms ELSE black_lag_quota_ms END)
+         FROM games WHERE id = $1 AND status = 'active'",
+    )
+    .bind(id)
+    .bind(LagPolicy::default().max_credit_per_move_ms as i64)
+    .fetch_optional(pool)
+    .await?;
+    Ok(due.unwrap_or(false))
 }

@@ -15,6 +15,18 @@ pub struct Config {
     pub reset_ttl_secs: i64,
     /// At most one email of each kind per address in this many seconds.
     pub email_cooldown_secs: i64,
+    /// Realtime (WebSocket) behaviour. Times are in milliseconds.
+    pub ws_hello_timeout_ms: u64,
+    pub ws_ping_interval_ms: u64,
+    /// A connection that has not answered a ping for this long is closed.
+    pub ws_pong_timeout_ms: u64,
+    /// How often the server looks for fallen flags and re-checks that the player's session is still valid.
+    pub ws_tick_ms: u64,
+    pub ws_clock_sync_ms: u64,
+    pub ws_reauth_ms: u64,
+    pub ws_max_message_bytes: usize,
+    pub ws_max_subscriptions: usize,
+    pub ws_max_messages_per_second: u32,
     /// A custodial wallet account is created for each of these when a player signs up.
     pub wallet_assets: Vec<AssetId>,
 }
@@ -31,6 +43,15 @@ impl Default for Config {
             reset_ttl_secs: 30 * 60,
             email_cooldown_secs: 60,
             wallet_assets: vec![AssetId::native()],
+            ws_hello_timeout_ms: 5_000,
+            ws_ping_interval_ms: 10_000,
+            ws_pong_timeout_ms: 30_000,
+            ws_tick_ms: 1_000,
+            ws_clock_sync_ms: 5_000,
+            ws_reauth_ms: 5_000,
+            ws_max_message_bytes: 16 * 1024,
+            ws_max_subscriptions: 20,
+            ws_max_messages_per_second: 30,
         }
     }
 }
@@ -62,6 +83,8 @@ impl Config {
             reset_ttl_secs: var("RESET_LINK_SECONDS", d.reset_ttl_secs),
             email_cooldown_secs: var("EMAIL_COOLDOWN_SECONDS", d.email_cooldown_secs),
             wallet_assets,
+            // Realtime settings keep their defaults (tests tune them directly).
+            ..d
         })
     }
 

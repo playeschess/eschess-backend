@@ -873,3 +873,50 @@ async fn the_database_itself_protects_the_history_and_the_shape_of_games(pool: P
     );
     assert_eq!(api.count("SELECT count(*) FROM game_moves").await, 1);
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_player_can_have_only_three_open_games_even_when_asking_at_once(pool: PgPool) {
+    let api = Api::new(pool);
+    let ada = api.player("ada").await;
+    let grace = api.player("grace").await;
+    let body = json!({ "time_control": { "base_seconds": 60 } });
+
+    // Ten requests at the same moment: exactly three get through.
+    let attempts =
+        futures::future::join_all((0..10).map(|_| api.post("/v1/games", &ada, body.clone()))).await;
+    let created = attempts
+        .iter()
+        .filter(|(s, _)| *s == StatusCode::CREATED)
+        .count();
+    assert_eq!(created, 3);
+    for (s, b) in attempts.iter().filter(|(s, _)| *s != StatusCode::CREATED) {
+        assert_eq!(
+            (*s, b["error"]["code"].as_str()),
+            (StatusCode::CONFLICT, Some("too_many_open_games"))
+        );
+    }
+    // It is a per-player limit, not a global one.
+    assert_eq!(
+        api.post("/v1/games", &grace, body.clone()).await.0,
+        StatusCode::CREATED
+    );
+
+    // Cancelling one frees a place; a game that has started no longer counts as open.
+    let (_, mine) = api.get("/v1/games?scope=mine", &ada).await;
+    let first = id_of(&mine["games"][0]);
+    assert_eq!(
+        api.post(&format!("/v1/games/{first}/cancel"), &ada, json!({}))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (s, g) = api.post("/v1/games", &ada, body.clone()).await;
+    assert_eq!(s, StatusCode::CREATED);
+    api.post(&format!("/v1/games/{}/join", id_of(&g)), &grace, json!({}))
+        .await;
+    assert_eq!(
+        api.post("/v1/games", &ada, body).await.0,
+        StatusCode::CREATED
+    );
+}
