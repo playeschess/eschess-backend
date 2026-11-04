@@ -55,6 +55,7 @@ POST   /v1/games/{id}/cancel    withdraw a game nobody has joined
 POST   /v1/games/{id}/moves     play a move: {"uci":"e2e4","client_move_id":"<uuid>"}; a retry with the same id is safe
 POST   /v1/games/{id}/resign    resign
 POST   /v1/games/{id}/claim-draw  claim a draw by threefold repetition or the fifty-move rule
+GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
 ```
 
@@ -103,7 +104,42 @@ just asks for `GET /v1/games?scope=mine`.
   connection), the original outcome is returned and nothing is played twice, even after the opponent has replied.
 - **One move at a time per game.** Every change locks the game's row first, so two simultaneous requests take turns.
 - **Time.** The server's time comes from the database. A flag that has fallen is noticed by the next request that touches
-  the game. Lag credit is zero for now: over plain HTTP the server cannot measure a player's lag, so that comes with
-  WebSockets.
+  the game. Over plain HTTP the server cannot measure a player's lag, so lag credit is zero there; over the
+  WebSocket it is measured (below).
+- **Open games.** A player may have at most 3 games waiting for an opponent (`409 too_many_open_games`).
 - **Visibility.** Open games are public; a game in progress or finished is visible only to its two players (anyone else
   is told it does not exist).
+
+## Live play over a WebSocket (bins/api)
+
+`GET /v1/ws` upgrades to a WebSocket (protocol version 1). Every message is a JSON object with a `type`:
+
+```
+client -> HELLO         {protocol_version, access_token}   must be first, within 5 s; the token is never put in the URL
+server -> WELCOME       {protocol_version, user_id, server_time_ms}
+client -> SUBSCRIBE     {game_id, last_event_seq?}         watch a game you may see
+server -> GAME_SNAPSHOT {game_id, event_seq, unchanged, game}
+server -> GAME_UPDATE   {event_seq, game}                  whenever the game changes, whoever changed it (HTTP too)
+client -> MOVE_REQUEST  {game_id, uci, client_move_id}
+server -> MOVE_ACCEPTED {client_move_id, game_id, ply, uci, replayed, measured_lag_ms, credited_ms, charged_ms, event_seq}
+      or MOVE_REJECTED  {client_move_id, game_id, code, message}
+server -> CLOCK_SYNC    {game_id, event_seq, turn, clock}  every few seconds, to correct a drifting clock
+server -> PING {id, server_time_ms}    client -> PONG {id}
+server -> ERROR         {code, message, game_id?}
+client -> UNSUBSCRIBE   {game_id}
+```
+
+- **The server stays in charge.** A move request names only a game and a move; identity, position, turn and time are
+  never taken from the client. A stranger who subscribes to someone else's game gets the same `not_found` as for a game
+  that does not exist.
+- **Gaps.** `event_seq` goes up by one on every change to a game. A client that sees a jump re-sends SUBSCRIBE and gets
+  a fresh snapshot; sending its last `event_seq` makes the reply cheap (`unchanged: true`).
+- **Several servers.** A change is announced through Postgres `LISTEN/NOTIFY` when it commits, so a player connected to
+  any server hears about a move made through any other.
+- **Lag.** The server times each PING/PONG round trip and takes half of the median as the player's lag. A move refunds
+  that lag to the mover's clock, capped per move, from a quota that refills slowly, so a bad connection is not punished
+  but cannot be abused.
+- **Housekeeping.** Silent connections are closed (no PONG within 30 s), tokens are re-checked every few seconds so
+  signing out closes the socket, and oversized messages, floods, repeated garbage and too many subscriptions are cut
+  off. The limits are the `ws_*` fields of `Config` (`bins/api/src/config.rs`); they have sensible defaults and are not yet
+  read from the environment.
