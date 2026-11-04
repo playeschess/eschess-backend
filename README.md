@@ -46,7 +46,7 @@ POST   /v1/auth/refresh         trade a refresh token for new tokens (each refre
 POST   /v1/auth/logout          end this session
 GET    /v1/auth/sessions        list your signed-in devices
 DELETE /v1/auth/sessions/{id}   sign one of your devices out
-GET    /v1/me                   your profile and wallet balances
+GET    /v1/me                   your profile, wallet balances and ratings
 POST   /v1/games                open a game for someone to join (time control, colour)
 GET    /v1/games                the lobby (?scope=open), your games (?scope=mine), your past games (?scope=finished)
 GET    /v1/games/{id}           a game: position, moves, clock, and your legal moves when it is your turn
@@ -55,6 +55,7 @@ POST   /v1/games/{id}/cancel    withdraw a game nobody has joined
 POST   /v1/games/{id}/moves     play a move: {"uci":"e2e4","client_move_id":"<uuid>"}; a retry with the same id is safe
 POST   /v1/games/{id}/resign    resign
 POST   /v1/games/{id}/claim-draw  claim a draw by threefold repetition or the fifty-move rule
+GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
 ```
@@ -143,3 +144,17 @@ client -> UNSUBSCRIBE   {game_id}
   signing out closes the socket, and oversized messages, floods, repeated garbage and too many subscriptions are cut
   off. The limits are the `ws_*` fields of `Config` (`bins/api/src/config.rs`); they have sensible defaults and are not yet
   read from the environment.
+
+## Ratings (crates/domain, crates/storage)
+
+Ratings are **Glicko-2** (`eschess_domain::rating`, checked against the worked example in Glickman's paper): a rating,
+a deviation (how unsure it is) and a volatility. A player has one per speed class (bullet, blitz, rapid, classical,
+from the time control), starting at 1500 with deviation 350.
+
+- Every finished game updates both players inside the same transaction that ends it, whatever the way it ended
+  (checkmate, resignation, timeout, draw), and `rating_history` (append-only) records the before and after, once per
+  player per game.
+- A game counts only if at least 4 plies were played (`MIN_PLIES_FOR_RATING`), so abandoning a game at once cannot be
+  used to trade rating. Each game is its own rating period.
+- A rating is `provisional` while its deviation is above 110. The leaderboard lists only established players.
+- There is no rated/casual choice yet: every game counts. Add one before real-money games if it is wanted.

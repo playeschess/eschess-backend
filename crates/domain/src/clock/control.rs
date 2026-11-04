@@ -22,6 +22,17 @@ pub enum Category {
     Classical,
 }
 
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Category::Bullet => "bullet",
+            Category::Blitz => "blitz",
+            Category::Rapid => "rapid",
+            Category::Classical => "classical",
+        }
+    }
+}
+
 impl TimeControl {
     pub fn new(base_ms: u64, increment_ms: u64) -> Result<TimeControl, ClockError> {
         if !(MIN_BASE_MS..=MAX_BASE_MS).contains(&base_ms) {
