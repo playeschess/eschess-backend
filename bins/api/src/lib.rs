@@ -47,6 +47,16 @@ pub fn app(state: AppState) -> Router {
             delete(routes::auth::revoke_session),
         )
         .route("/v1/me", get(routes::me::me))
+        .route(
+            "/v1/games",
+            get(routes::games::list).post(routes::games::create),
+        )
+        .route("/v1/games/{id}", get(routes::games::get))
+        .route("/v1/games/{id}/join", post(routes::games::join))
+        .route("/v1/games/{id}/cancel", post(routes::games::cancel))
+        .route("/v1/games/{id}/moves", post(routes::games::play_move))
+        .route("/v1/games/{id}/resign", post(routes::games::resign))
+        .route("/v1/games/{id}/claim-draw", post(routes::games::claim_draw))
         .with_state(state)
 }
 

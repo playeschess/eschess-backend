@@ -223,6 +223,70 @@ check "the old password no longer works (401)" 401 "$STATUS"
 call POST /v1/auth/login "" "{\"email\":\"$EMAIL\",\"password\":\"$NEW_PASSWORD\"}"
 check "the new password works (200)" 200 "$STATUS"
 
+bold "Playing chess"
+W_NAME="wh_$RUN"; B_NAME="bl_$RUN"
+call POST /v1/auth/signup "" "{\"email\":\"$W_NAME@example.com\",\"username\":\"$W_NAME\",\"password\":\"$PASSWORD\"}"
+WHITE_TOKEN=$(field access_token)
+call POST /v1/auth/signup "" "{\"email\":\"$B_NAME@example.com\",\"username\":\"$B_NAME\",\"password\":\"$PASSWORD\"}"
+BLACK_TOKEN=$(field access_token)
+call POST /v1/games "$WHITE_TOKEN" '{"time_control":{"base_seconds":300,"increment_seconds":3},"color":"white"}'
+check "opening a 5+3 game answers 201" 201 "$STATUS"
+check "it is waiting for an opponent" waiting "$(field status)"
+check "and is classed as blitz" blitz "$(field time_control.category)"
+GAME=$(field id)
+call GET /v1/games "$BLACK_TOKEN"
+check "it appears in another player's lobby" yes "$(echo "$BODY" | grep -q "$GAME" && echo yes || echo no)"
+call POST "/v1/games/$GAME/join" "$WHITE_TOKEN"
+check "you cannot join your own game (409)" 409 "$STATUS"
+call POST "/v1/games/$GAME/join" "$BLACK_TOKEN"
+check "the opponent joins and the game starts (200)" 200 "$STATUS"
+check "the game is now active" active "$(field status)"
+check "the creator has White, as asked" "$W_NAME" "$(field white.username)"
+check "it is White's turn" white "$(field turn)"
+call GET "/v1/games/$GAME" "$WHITE_TOKEN"
+check "White is offered their 20 legal moves" 20 "$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])['legal_moves']))" "$BODY")"
+call POST /v1/auth/login "" "{\"email\":\"$EMAIL\",\"password\":\"$NEW_PASSWORD\"}"
+STRANGER_TOKEN=$(field access_token)
+call GET "/v1/games/$GAME" "$STRANGER_TOKEN"
+check "a signed-in stranger is told there is no such game (404)" 404 "$STATUS"
+
+# move TOKEN UCI [CLIENT_MOVE_ID]  ->  plays a move, with a fresh client_move_id unless one is given
+move() {
+  local cid=${3:-$(cat /proc/sys/kernel/random/uuid)}
+  call POST "/v1/games/$GAME/moves" "$1" "{\"uci\":\"$2\",\"client_move_id\":\"$cid\"}"
+}
+move "$BLACK_TOKEN" e7e5
+check "Black moving first is refused (409 not_your_turn)" not_your_turn "$(field error.code)"
+move "$WHITE_TOKEN" e2e5
+check "an illegal move is refused (422)" 422 "$STATUS"
+move "$WHITE_TOKEN" hello
+check "a badly written move is refused (400)" 400 "$STATUS"
+FIRST_ID=$(cat /proc/sys/kernel/random/uuid)
+move "$WHITE_TOKEN" f2f3 "$FIRST_ID"
+check "White plays f2f3 (200)" 200 "$STATUS"
+check "the position changes and it is Black's turn" black "$(field game.turn)"
+move "$WHITE_TOKEN" f2f3 "$FIRST_ID"
+check "sending the same move again (a retry) is recognised, not replayed" true "$(field move.replayed)"
+check "and the game still has just one move" 1 "$(field game.ply)"
+move "$BLACK_TOKEN" e7e5
+check "Black plays e7e5" 200 "$STATUS"
+move "$WHITE_TOKEN" g2g4
+check "White plays g2g4" 200 "$STATUS"
+move "$BLACK_TOKEN" d8h4
+check "Black plays d8h4: checkmate (the fool's mate)" checkmate "$(field game.end_reason)"
+check "the game is finished and Black won" "finished black" "$(field game.status) $(field game.result)"
+move "$WHITE_TOKEN" a2a3
+check "no more moves can be played (409 game_over)" game_over "$(field error.code)"
+call GET "/v1/games?scope=finished" "$WHITE_TOKEN"
+check "the game is in both players' finished list" yes "$(echo "$BODY" | grep -q "$GAME" && echo yes || echo no)"
+
+call POST /v1/games "$WHITE_TOKEN" '{"time_control":{"base_seconds":60}}'
+RESIGN_GAME=$(field id)
+call POST "/v1/games/$RESIGN_GAME/join" "$BLACK_TOKEN"
+call POST "/v1/games/$RESIGN_GAME/resign" "$BLACK_TOKEN"
+check "a player can resign (200)" 200 "$STATUS"
+check "and the game ends by resignation" resignation "$(field end_reason)"
+
 # ---------------------------------------------------------------- result
 
 echo

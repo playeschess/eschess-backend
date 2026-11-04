@@ -11,6 +11,7 @@ eschess-domain = { path = "../../crates/domain" }
 eschess-auth = { path = "../../crates/auth" }
 eschess-storage = { path = "../../crates/storage" }
 eschess-notification = { path = "../../crates/notification" }
+eschess-game = { path = "../../crates/game" }
 axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -19,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 eschess-domain = { path = "../../crates/domain" }

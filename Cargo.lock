@@ -410,11 +410,13 @@ dependencies = [
  "axum",
  "eschess-auth",
  "eschess-domain",
+ "eschess-game",
  "eschess-ledger",
  "eschess-notification",
  "eschess-storage",
  "futures",
  "http-body-util",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sqlx",
@@ -440,6 +442,14 @@ name = "eschess-domain"
 version = "0.1.0"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "eschess-game"
+version = "0.1.0"
+dependencies = [
+ "eschess-domain",
+ "uuid",
 ]
 
 [[package]]
@@ -475,6 +485,7 @@ name = "eschess-storage"
 version = "0.1.0"
 dependencies = [
  "eschess-domain",
+ "eschess-game",
  "eschess-ledger",
  "futures",
  "proptest",

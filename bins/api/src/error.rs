@@ -7,6 +7,8 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum ApiError {
     Validation(String),
+    /// An error with its own status and stable code, for the many specific conflicts games can have.
+    Coded(StatusCode, &'static str, String),
     InvalidToken,
     AlreadyVerified,
     EmailNotVerified,
@@ -29,6 +31,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             ApiError::Validation(m) => (StatusCode::BAD_REQUEST, "validation_failed", m),
+            ApiError::Coded(status, code, message) => (status, code, message),
             ApiError::InvalidToken => (
                 StatusCode::BAD_REQUEST,
                 "invalid_token",
@@ -105,6 +108,49 @@ impl From<eschess_storage::identity::IdentityError> for ApiError {
             EmailTaken => ApiError::EmailTaken,
             UsernameTaken => ApiError::UsernameTaken,
             other => ApiError::internal(other),
+        }
+    }
+}
+
+impl From<eschess_storage::games::GameError> for ApiError {
+    fn from(e: eschess_storage::games::GameError) -> Self {
+        use eschess_game::Refusal;
+        use eschess_storage::games::GameError::*;
+        let conflict = |code: &'static str, msg: &str| {
+            ApiError::Coded(StatusCode::CONFLICT, code, msg.to_string())
+        };
+        match e {
+            NotFound => ApiError::NotFound,
+            NotOpen => conflict("game_not_open", "that game is not open for joining"),
+            OwnGame => conflict("own_game", "you cannot join your own game"),
+            NotStarted => conflict(
+                "game_not_started",
+                "the game has not started: it is waiting for an opponent",
+            ),
+            MoveIdReused => conflict(
+                "client_move_id_reused",
+                "that client_move_id was already used for a different move",
+            ),
+            InvalidTimeControl(why) => ApiError::Validation(why.to_string()),
+            Refused(Refusal::NotAPlayer) => ApiError::NotFound,
+            Refused(Refusal::NotYourTurn) => conflict("not_your_turn", "it is not your turn"),
+            Refused(Refusal::GameOver) => conflict("game_over", "the game is over"),
+            Refused(Refusal::NothingToClaim) => conflict(
+                "nothing_to_claim",
+                "there is no draw to claim in this position",
+            ),
+            Refused(Refusal::InvalidNotation) => ApiError::Coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_move_notation",
+                "that is not a move in UCI notation, such as e2e4 or e7e8q".into(),
+            ),
+            Refused(Refusal::Illegal) => ApiError::Coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "illegal_move",
+                "that move is not legal in this position".into(),
+            ),
+            Refused(other) => ApiError::internal(other),
+            Database(e) => ApiError::internal(e),
         }
     }
 }
