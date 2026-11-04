@@ -1,0 +1,11 @@
+[package]
+name = "eschess-migrate"
+description = "Applies database migrations. Runs as a job before a new version starts taking traffic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eschess-storage = { path = "../../crates/storage" }
+tokio.workspace = true

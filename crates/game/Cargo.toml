@@ -1,0 +1,11 @@
+[package]
+name = "eschess-game"
+description = "The move loop: given a game, a move and a time, what happens. Pure: no database, no clock reads."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eschess-domain = { path = "../domain" }
+uuid.workspace = true

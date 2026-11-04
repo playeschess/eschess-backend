@@ -1,0 +1,16 @@
+[package]
+name = "eschess-notification"
+description = "Sending messages to players. Delivery is pluggable: log, in-memory (tests) or SMTP."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "ring", "webpki-roots"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util"] }

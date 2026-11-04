@@ -1,0 +1,20 @@
+[package]
+name = "eschess-storage"
+description = "PostgreSQL access: the connection pool, migrations and (soon) repositories."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eschess-domain = { path = "../domain" }
+eschess-game = { path = "../game" }
+eschess-ledger = { path = "../ledger" }
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+proptest.workspace = true
+futures.workspace = true

@@ -8,13 +8,26 @@ publish.workspace = true
 
 [dependencies]
 eschess-domain = { path = "../../crates/domain" }
+eschess-auth = { path = "../../crates/auth" }
+eschess-storage = { path = "../../crates/storage" }
+eschess-notification = { path = "../../crates/notification" }
+eschess-game = { path = "../../crates/game" }
 axum.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
+tokio-tungstenite = "0.26"
+eschess-domain = { path = "../../crates/domain" }
+eschess-auth = { path = "../../crates/auth" }
+eschess-ledger = { path = "../../crates/ledger" }
 tower.workspace = true
 http-body-util.workspace = true
+futures.workspace = true
