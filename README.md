@@ -47,7 +47,7 @@ POST   /v1/auth/logout          end this session
 GET    /v1/auth/sessions        list your signed-in devices
 DELETE /v1/auth/sessions/{id}   sign one of your devices out
 GET    /v1/me                   your profile, wallet balances and ratings
-POST   /v1/games                open a game for someone to join (time control, colour)
+POST   /v1/games                open a game for someone to join (time control, colour, rated or casual)
 GET    /v1/games                the lobby (?scope=open), your games (?scope=mine), your past games (?scope=finished)
 GET    /v1/games/{id}           a game: position, moves, clock, and your legal moves when it is your turn
 POST   /v1/games/{id}/join      join an open game, which starts it
@@ -157,4 +157,5 @@ from the time control), starting at 1500 with deviation 350.
 - A game counts only if at least 4 plies were played (`MIN_PLIES_FOR_RATING`), so abandoning a game at once cannot be
   used to trade rating. Each game is its own rating period.
 - A rating is `provisional` while its deviation is above 110. The leaderboard lists only established players.
-- There is no rated/casual choice yet: every game counts. Add one before real-money games if it is wanted.
+- **Rated or casual.** The creator chooses when opening a game (`"rated": false` for casual; rated is the default). The
+  choice is shown on the game, lobby included, and cannot change afterwards. Casual games never touch ratings.

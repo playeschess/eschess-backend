@@ -39,7 +39,7 @@ pub(crate) fn game_json(g: &GameView) -> Value {
         "id": g.id, "status": g.status, "created_by": g.created_by,
         "white": player_json(&g.white), "black": player_json(&g.black),
         "time_control": { "base_ms": g.base_ms, "increment_ms": g.increment_ms, "category": category.ok() },
-        "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
+        "rated": g.rated, "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
         "clock": { "white_ms": g.white_ms, "black_ms": g.black_ms, "as_of_ms": g.as_of_ms },
         "result": g.result, "end_reason": g.end_reason, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
     })
@@ -61,6 +61,8 @@ pub struct CreateBody {
     time_control: TimeControlBody,
     /// `white`, `black` or `random` (the default).
     color: Option<String>,
+    /// Whether the game counts for ratings (the default) or is casual.
+    rated: Option<bool>,
 }
 
 /// Opens a game for another player to join.
@@ -85,7 +87,15 @@ pub async fn create(
         .increment_seconds
         .checked_mul(1_000)
         .ok_or_else(|| ApiError::Validation("that increment is too large".into()))?;
-    let id = games::create_game(&state.pool, user.user_id, base_ms, increment_ms, color).await?;
+    let id = games::create_game(
+        &state.pool,
+        user.user_id,
+        base_ms,
+        increment_ms,
+        color,
+        b.rated.unwrap_or(true),
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(game_json(

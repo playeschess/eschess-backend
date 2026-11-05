@@ -89,6 +89,8 @@ pub struct GameView {
     pub status: String,
     pub created_by: Uuid,
     pub color_preference: String,
+    /// Whether the result counts for ratings. Fixed when the game is opened.
+    pub rated: bool,
     pub white: Option<Player>,
     pub black: Option<Player>,
     pub base_ms: i64,
@@ -125,6 +127,7 @@ struct GameRow {
     id: Uuid,
     created_by: Uuid,
     color_preference: String,
+    rated: bool,
     white_id: Option<Uuid>,
     black_id: Option<Uuid>,
     base_ms: i64,
@@ -140,13 +143,14 @@ struct GameRow {
     turn_started_at_ms: Option<i64>,
 }
 
-const COLS: &str = "id, created_by, color_preference, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms";
+const COLS: &str = "id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
         id: r.get("id"),
         created_by: r.get("created_by"),
         color_preference: r.get("color_preference"),
+        rated: r.get("rated"),
         white_id: r.get("white_id"),
         black_id: r.get("black_id"),
         base_ms: r.get("base_ms"),
@@ -250,12 +254,12 @@ async fn finish(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
 /// Updates both players' ratings for a finished game, if it was played enough to count.
 async fn rate(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
     let r = sqlx::query(
-        "SELECT white_id, black_id, ply, base_ms, increment_ms FROM games WHERE id = $1",
+        "SELECT white_id, black_id, ply, base_ms, increment_ms, rated FROM games WHERE id = $1",
     )
     .bind(id)
     .fetch_one(&mut *db)
     .await?;
-    if r.get::<i32, _>("ply") < ratings::MIN_PLIES_FOR_RATING {
+    if !r.get::<bool, _>("rated") || r.get::<i32, _>("ply") < ratings::MIN_PLIES_FOR_RATING {
         return Ok(());
     }
     let (Some(white), Some(black)) = (
@@ -355,6 +359,7 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
         status: row.status.clone(),
         created_by: row.created_by,
         color_preference: row.color_preference.clone(),
+        rated: row.rated,
         white: username(db, row.white_id).await?,
         black: username(db, row.black_id).await?,
         base_ms: row.base_ms,
@@ -380,6 +385,7 @@ pub async fn create_game(
     base_ms: u64,
     increment_ms: u64,
     color_preference: &str,
+    rated: bool,
 ) -> Result<Uuid> {
     let control = TimeControl::new(base_ms, increment_ms).map_err(|_| GameError::InvalidTimeControl("the base time must be between 1 second and 3 hours and the increment at most 3 minutes"))?;
     let id = Uuid::now_v7();
@@ -400,8 +406,8 @@ pub async fn create_game(
         return Err(GameError::TooManyOpenGames);
     }
     sqlx::query(
-        "INSERT INTO games (id, created_by, color_preference, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        "INSERT INTO games (id, created_by, color_preference, rated, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms)
+         VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)",
     )
     .bind(id)
     .bind(creator)
@@ -413,6 +419,7 @@ pub async fn create_game(
     .bind(clock.remaining_ms[1] as i64)
     .bind(clock.lag_quota_ms[0] as i64)
     .bind(clock.lag_quota_ms[1] as i64)
+    .bind(rated)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

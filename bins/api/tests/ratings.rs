@@ -279,3 +279,59 @@ async fn many_games_finishing_at_once_never_deadlock_or_lose_a_rating_update(poo
         6
     );
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_casual_game_never_touches_ratings_and_rated_is_the_default(pool: PgPool) {
+    let api = Api::new(pool);
+    let (ada, grace) = (api.player("ada").await, api.player("grace").await);
+
+    // Not saying anything means rated; the choice is shown to everyone who sees the game, lobby included.
+    let (_, g) = api
+        .post(
+            "/v1/games",
+            &ada,
+            json!({ "time_control": { "base_seconds": 300 } }),
+        )
+        .await;
+    assert_eq!(g["rated"], true);
+    let (_, g) = api
+        .post(
+            "/v1/games",
+            &ada,
+            json!({ "time_control": { "base_seconds": 300 }, "rated": false, "color": "white" }),
+        )
+        .await;
+    assert_eq!(g["rated"], false);
+    let casual = id_of(&g);
+    let lobby = api.get("/v1/games", &grace).await.1;
+    let flags: Vec<bool> = lobby["games"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["rated"].as_bool().unwrap())
+        .collect();
+    assert!(flags.contains(&true) && flags.contains(&false), "{flags:?}");
+    let bad = api
+        .post(
+            "/v1/games",
+            &ada,
+            json!({ "time_control": { "base_seconds": 300 }, "rated": "yes" }),
+        )
+        .await
+        .0;
+    assert!(bad.is_client_error(), "{bad}");
+
+    // A whole casual game, to checkmate: it is finished and recorded, but nobody's rating exists or changes.
+    api.post(&format!("/v1/games/{casual}/join"), &grace, json!({}))
+        .await;
+    foolsmate(&api, casual, &ada, &grace).await;
+    let (_, done) = api.get(&format!("/v1/games/{casual}"), &ada).await;
+    assert_eq!(
+        (done["status"].as_str(), done["rated"].as_bool()),
+        (Some("finished"), Some(false))
+    );
+    assert_eq!(api.count("SELECT count(*) FROM ratings").await, 0);
+    assert_eq!(api.count("SELECT count(*) FROM rating_history").await, 0);
+    assert!(rating_of(&api, &grace, "blitz").await.is_none());
+}
