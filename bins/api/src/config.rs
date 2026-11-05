@@ -56,36 +56,103 @@ impl Default for Config {
     }
 }
 
-fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+fn var_from<T: std::str::FromStr>(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: T,
+) -> T {
+    get(name).and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Like `var_from`, but a value that is present and not a valid number is an error, so a typo in a safety limit stops the
+/// server from starting instead of silently running with the default.
+fn strict<T: std::str::FromStr>(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: T,
+) -> Result<T, String> {
+    match get(name) {
+        None => Ok(default),
+        Some(v) if v.trim().is_empty() => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse()
+            .map_err(|_| format!("{name}: {v:?} is not a valid number")),
+    }
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        Config::from_lookup(&|name| std::env::var(name).ok())
+    }
+
+    /// Builds the settings from any source of named values (the environment, or a map in a test).
+    pub fn from_lookup(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let d = Config::default();
-        let wallet_assets = match std::env::var("WALLET_ASSETS") {
-            Ok(list) if !list.trim().is_empty() => list
+        let wallet_assets = match get("WALLET_ASSETS") {
+            Some(list) if !list.trim().is_empty() => list
                 .split(',')
                 .map(|a| AssetId::parse(a.trim()).map_err(|e| format!("WALLET_ASSETS: {a:?}: {e}")))
                 .collect::<Result<Vec<_>, _>>()?,
             _ => d.wallet_assets.clone(),
         };
-        Ok(Config {
-            access_secs: var("ACCESS_TOKEN_SECONDS", d.access_secs),
-            refresh_secs: var("REFRESH_TOKEN_SECONDS", d.refresh_secs),
-            session_max_secs: var("SESSION_MAX_SECONDS", d.session_max_secs),
-            max_failed_logins: var("MAX_FAILED_LOGINS", d.max_failed_logins),
-            lockout_minutes: var("LOCKOUT_MINUTES", d.lockout_minutes),
-            verify_ttl_secs: var("VERIFY_LINK_SECONDS", d.verify_ttl_secs),
-            reset_ttl_secs: var("RESET_LINK_SECONDS", d.reset_ttl_secs),
-            email_cooldown_secs: var("EMAIL_COOLDOWN_SECONDS", d.email_cooldown_secs),
+        let config = Config {
+            access_secs: var_from(get, "ACCESS_TOKEN_SECONDS", d.access_secs),
+            refresh_secs: var_from(get, "REFRESH_TOKEN_SECONDS", d.refresh_secs),
+            session_max_secs: var_from(get, "SESSION_MAX_SECONDS", d.session_max_secs),
+            max_failed_logins: var_from(get, "MAX_FAILED_LOGINS", d.max_failed_logins),
+            lockout_minutes: var_from(get, "LOCKOUT_MINUTES", d.lockout_minutes),
+            verify_ttl_secs: var_from(get, "VERIFY_LINK_SECONDS", d.verify_ttl_secs),
+            reset_ttl_secs: var_from(get, "RESET_LINK_SECONDS", d.reset_ttl_secs),
+            email_cooldown_secs: var_from(get, "EMAIL_COOLDOWN_SECONDS", d.email_cooldown_secs),
             wallet_assets,
-            // Realtime settings keep their defaults (tests tune them directly).
-            ..d
-        })
+            ws_hello_timeout_ms: strict(get, "WS_HELLO_TIMEOUT_MS", d.ws_hello_timeout_ms)?,
+            ws_ping_interval_ms: strict(get, "WS_PING_INTERVAL_MS", d.ws_ping_interval_ms)?,
+            ws_pong_timeout_ms: strict(get, "WS_PONG_TIMEOUT_MS", d.ws_pong_timeout_ms)?,
+            ws_tick_ms: strict(get, "WS_TICK_MS", d.ws_tick_ms)?,
+            ws_clock_sync_ms: strict(get, "WS_CLOCK_SYNC_MS", d.ws_clock_sync_ms)?,
+            ws_reauth_ms: strict(get, "WS_REAUTH_MS", d.ws_reauth_ms)?,
+            ws_max_message_bytes: strict(get, "WS_MAX_MESSAGE_BYTES", d.ws_max_message_bytes)?,
+            ws_max_subscriptions: strict(get, "WS_MAX_SUBSCRIPTIONS", d.ws_max_subscriptions)?,
+            ws_max_messages_per_second: strict(
+                get,
+                "WS_MAX_MESSAGES_PER_SECOND",
+                d.ws_max_messages_per_second,
+            )?,
+        };
+        config.check_realtime()?;
+        Ok(config)
+    }
+
+    /// Refuses realtime settings that would make the server misbehave (a zero timer spins; a pong timeout shorter than the
+    /// ping interval would close every healthy connection).
+    pub fn check_realtime(&self) -> Result<(), String> {
+        let positive = [
+            ("WS_HELLO_TIMEOUT_MS", self.ws_hello_timeout_ms),
+            ("WS_PING_INTERVAL_MS", self.ws_ping_interval_ms),
+            ("WS_PONG_TIMEOUT_MS", self.ws_pong_timeout_ms),
+            ("WS_TICK_MS", self.ws_tick_ms),
+            ("WS_CLOCK_SYNC_MS", self.ws_clock_sync_ms),
+            ("WS_REAUTH_MS", self.ws_reauth_ms),
+            ("WS_MAX_MESSAGE_BYTES", self.ws_max_message_bytes as u64),
+            ("WS_MAX_SUBSCRIPTIONS", self.ws_max_subscriptions as u64),
+            (
+                "WS_MAX_MESSAGES_PER_SECOND",
+                self.ws_max_messages_per_second as u64,
+            ),
+        ];
+        for (name, value) in positive {
+            if value == 0 {
+                return Err(format!("{name} must be greater than zero"));
+            }
+        }
+        if self.ws_pong_timeout_ms <= self.ws_ping_interval_ms {
+            return Err(format!(
+                "WS_PONG_TIMEOUT_MS ({}) must be longer than WS_PING_INTERVAL_MS ({}), or every healthy connection would be closed",
+                self.ws_pong_timeout_ms, self.ws_ping_interval_ms
+            ));
+        }
+        Ok(())
     }
 
     pub fn lifetimes(&self) -> Lifetimes {
@@ -94,5 +161,92 @@ impl Config {
             refresh_secs: self.refresh_secs,
             session_max_secs: self.session_max_secs,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn load(pairs: &[(&str, &str)]) -> Result<Config, String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::from_lookup(&|name| map.get(name).cloned())
+    }
+
+    #[test]
+    fn nothing_set_gives_the_defaults() {
+        let c = load(&[]).unwrap();
+        let d = Config::default();
+        assert_eq!(
+            (
+                c.ws_ping_interval_ms,
+                c.ws_max_subscriptions,
+                c.ws_max_message_bytes
+            ),
+            (
+                d.ws_ping_interval_ms,
+                d.ws_max_subscriptions,
+                d.ws_max_message_bytes
+            )
+        );
+    }
+
+    #[test]
+    fn websocket_limits_can_be_set_from_the_environment() {
+        let c = load(&[
+            ("WS_PING_INTERVAL_MS", "2000"),
+            ("WS_PONG_TIMEOUT_MS", "9000"),
+            ("WS_MAX_SUBSCRIPTIONS", "5"),
+            ("WS_MAX_MESSAGES_PER_SECOND", "10"),
+            ("WS_MAX_MESSAGE_BYTES", " 4096 "),
+        ])
+        .unwrap();
+        assert_eq!(
+            (c.ws_ping_interval_ms, c.ws_pong_timeout_ms),
+            (2_000, 9_000)
+        );
+        assert_eq!(
+            (
+                c.ws_max_subscriptions,
+                c.ws_max_messages_per_second,
+                c.ws_max_message_bytes
+            ),
+            (5, 10, 4_096)
+        );
+        // An empty value means "use the default", like an unset one.
+        assert_eq!(
+            load(&[("WS_TICK_MS", "")]).unwrap().ws_tick_ms,
+            Config::default().ws_tick_ms
+        );
+    }
+
+    #[test]
+    fn a_typo_in_a_limit_stops_the_server_starting() {
+        let e = load(&[("WS_MAX_SUBSCRIPTIONS", "twenty")]).unwrap_err();
+        assert!(
+            e.contains("WS_MAX_SUBSCRIPTIONS") && e.contains("twenty"),
+            "{e}"
+        );
+        assert!(load(&[("WS_TICK_MS", "-5")]).is_err());
+        assert!(load(&[("WS_PING_INTERVAL_MS", "1.5")]).is_err());
+    }
+
+    #[test]
+    fn settings_that_would_break_the_server_are_refused() {
+        let zero = load(&[("WS_TICK_MS", "0")]).unwrap_err();
+        assert!(zero.contains("WS_TICK_MS"), "{zero}");
+        assert!(load(&[("WS_MAX_MESSAGES_PER_SECOND", "0")]).is_err());
+        // Pings sent less often than the connection is allowed to stay silent would close everyone.
+        let e = load(&[
+            ("WS_PING_INTERVAL_MS", "30000"),
+            ("WS_PONG_TIMEOUT_MS", "30000"),
+        ])
+        .unwrap_err();
+        assert!(e.contains("WS_PONG_TIMEOUT_MS"), "{e}");
+        assert!(Config::default().check_realtime().is_ok());
     }
 }
