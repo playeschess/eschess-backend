@@ -69,6 +69,15 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/games/{id}/moves", post(routes::games::play_move))
         .route("/v1/games/{id}/resign", post(routes::games::resign))
         .route("/v1/games/{id}/claim-draw", post(routes::games::claim_draw))
+        .route("/v1/games/{id}/draw-offer", post(routes::games::offer_draw))
+        .route(
+            "/v1/games/{id}/draw-offer/accept",
+            post(routes::games::accept_draw_offer),
+        )
+        .route(
+            "/v1/games/{id}/draw-offer/decline",
+            post(routes::games::decline_draw_offer),
+        )
         .with_state(state)
 }
 

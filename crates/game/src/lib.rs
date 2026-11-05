@@ -59,6 +59,8 @@ pub enum EndReason {
     /// Draws a player claimed.
     ThreefoldRepetition,
     FiftyMoveRule,
+    /// Both players agreed to a draw.
+    Agreement,
 }
 
 impl EndReason {
@@ -74,6 +76,7 @@ impl EndReason {
             EndReason::SeventyFiveMoveRule => "seventy_five_move_rule",
             EndReason::ThreefoldRepetition => "threefold_repetition",
             EndReason::FiftyMoveRule => "fifty_move_rule",
+            EndReason::Agreement => "agreement",
         }
     }
 }
@@ -128,6 +131,12 @@ pub enum Refusal {
     GameOver,
     /// Nothing to claim.
     NothingToClaim,
+    /// A draw offer of yours is already on the table, or you already offered one in this very position.
+    DrawAlreadyOffered,
+    /// There is no draw offer to answer.
+    NoDrawOffer,
+    /// You cannot accept your own draw offer.
+    OwnDrawOffer,
     /// The stored game cannot be replayed: a bug or corrupted data, never the player's fault.
     CorruptHistory,
     Clock(ClockError),
@@ -145,6 +154,11 @@ impl fmt::Display for Refusal {
             Refusal::Illegal => write!(f, "that move is not legal in this position"),
             Refusal::GameOver => write!(f, "the game is over"),
             Refusal::NothingToClaim => write!(f, "there is no draw to claim in this position"),
+            Refusal::DrawAlreadyOffered => {
+                write!(f, "you have already offered a draw in this position")
+            }
+            Refusal::NoDrawOffer => write!(f, "there is no draw offer to answer"),
+            Refusal::OwnDrawOffer => write!(f, "you cannot accept your own draw offer"),
             Refusal::CorruptHistory => write!(f, "the stored game history is not valid"),
             Refusal::Clock(e) => write!(f, "{e}"),
         }
@@ -296,6 +310,111 @@ pub fn claim_draw(game: &ActiveGame, actor: Uuid) -> Result<Ended, Refusal> {
         Some(ClaimableDraw::ThreefoldRepetition) => Ok(Ended::draw(EndReason::ThreefoldRepetition)),
         Some(ClaimableDraw::FiftyMoveRule) => Ok(Ended::draw(EndReason::FiftyMoveRule)),
         None => Err(Refusal::NothingToClaim),
+    }
+}
+
+/// The draw offers in a game: who has one waiting, and when each side last made one.
+///
+/// An offer stays until it is accepted, declined or withdrawn, or until the player it was made to plays a move (which
+/// counts as declining it). The player who made it may keep playing. To stop a player pestering their opponent, each
+/// side may make only one offer per position: after an offer is turned down, a new one needs a move to have been played.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DrawOffers {
+    pub pending: Option<Color>,
+    /// The number of moves played when White and Black (in that order) last made an offer.
+    pub last_offer_ply: [Option<u32>; 2],
+}
+
+fn slot(color: Color) -> usize {
+    match color {
+        Color::White => 0,
+        Color::Black => 1,
+    }
+}
+
+/// What answering a draw offer did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Answered {
+    pub offers: DrawOffers,
+    /// Set when the offer was accepted: the game is a draw.
+    pub ended: Option<Ended>,
+}
+
+/// A player offers a draw. Allowed at any time in a game that is still going, whoever's turn it is.
+pub fn offer_draw(
+    game: &ActiveGame,
+    actor: Uuid,
+    offers: &DrawOffers,
+) -> Result<Answered, Refusal> {
+    let color = game.color_of(actor).ok_or(Refusal::NotAPlayer)?;
+    if game.rules()?.outcome().is_some() {
+        return Err(Refusal::GameOver);
+    }
+    let ply = game.moves.len() as u32;
+    if offers.pending == Some(color) || offers.last_offer_ply[slot(color)] == Some(ply) {
+        return Err(Refusal::DrawAlreadyOffered);
+    }
+    let mut next = *offers;
+    next.last_offer_ply[slot(color)] = Some(ply);
+    // The opponent already offered, and now this player does too: both want a draw, so it is agreed.
+    if offers.pending == Some(color.opposite()) {
+        next.pending = None;
+        return Ok(Answered {
+            offers: next,
+            ended: Some(Ended::draw(EndReason::Agreement)),
+        });
+    }
+    next.pending = Some(color);
+    Ok(Answered {
+        offers: next,
+        ended: None,
+    })
+}
+
+/// The player an offer was made to accepts it (the game is drawn) or declines it. The player who made it may also
+/// decline, which withdraws it.
+pub fn answer_draw_offer(
+    game: &ActiveGame,
+    actor: Uuid,
+    offers: &DrawOffers,
+    accept: bool,
+) -> Result<Answered, Refusal> {
+    let color = game.color_of(actor).ok_or(Refusal::NotAPlayer)?;
+    if game.rules()?.outcome().is_some() {
+        return Err(Refusal::GameOver);
+    }
+    let Some(offered_by) = offers.pending else {
+        return Err(Refusal::NoDrawOffer);
+    };
+    if accept {
+        if offered_by == color {
+            return Err(Refusal::OwnDrawOffer);
+        }
+        return Ok(Answered {
+            offers: DrawOffers {
+                pending: None,
+                ..*offers
+            },
+            ended: Some(Ended::draw(EndReason::Agreement)),
+        });
+    }
+    Ok(Answered {
+        offers: DrawOffers {
+            pending: None,
+            ..*offers
+        },
+        ended: None,
+    })
+}
+
+/// A move has been played: an offer made to the player who just moved is thereby declined.
+pub fn offers_after_move(offers: &DrawOffers, mover: Color) -> DrawOffers {
+    match offers.pending {
+        Some(offered_by) if offered_by != mover => DrawOffers {
+            pending: None,
+            ..*offers
+        },
+        _ => *offers,
     }
 }
 
@@ -636,6 +755,7 @@ mod tests {
             EndReason::SeventyFiveMoveRule,
             EndReason::ThreefoldRepetition,
             EndReason::FiftyMoveRule,
+            EndReason::Agreement,
         ]
         .iter()
         .map(|r| r.as_str())
@@ -652,10 +772,124 @@ mod tests {
                 "fivefold_repetition",
                 "seventy_five_move_rule",
                 "threefold_repetition",
-                "fifty_move_rule"
+                "fifty_move_rule",
+                "agreement"
             ]
         );
         assert_eq!(GameResult::parse("draw"), Some(GameResult::Draw));
         assert_eq!(GameResult::parse("nobody"), None);
+    }
+
+    fn offers_game_after(moves: &[&str]) -> ActiveGame {
+        let mut g = new_game(300_000, 0);
+        for (i, m) in moves.iter().enumerate() {
+            g = step(&g, m, 1_000 * (i as u64 + 1)).0;
+        }
+        g
+    }
+
+    #[test]
+    fn a_draw_offer_can_be_accepted_declined_or_withdrawn() {
+        let (white, black, stranger) = ids();
+        let g = offers_game_after(&["e2e4"]);
+        let none = DrawOffers::default();
+
+        // White offers (even though it is Black's turn); only Black may accept, and it is a draw by agreement.
+        let offered = offer_draw(&g, white, &none).unwrap();
+        assert_eq!(offered.offers.pending, Some(Color::White));
+        assert!(offered.ended.is_none());
+        assert_eq!(
+            answer_draw_offer(&g, white, &offered.offers, true),
+            Err(Refusal::OwnDrawOffer)
+        );
+        let accepted = answer_draw_offer(&g, black, &offered.offers, true).unwrap();
+        assert_eq!(accepted.ended, Some(Ended::draw(EndReason::Agreement)));
+        assert_eq!(accepted.offers.pending, None);
+
+        // Declining clears it; so does the offerer withdrawing it.
+        for who in [black, white] {
+            let declined = answer_draw_offer(&g, who, &offered.offers, false).unwrap();
+            assert_eq!((declined.offers.pending, declined.ended), (None, None));
+        }
+        // Nothing to answer, and strangers have no part in it.
+        assert_eq!(
+            answer_draw_offer(&g, black, &none, true),
+            Err(Refusal::NoDrawOffer)
+        );
+        assert_eq!(offer_draw(&g, stranger, &none), Err(Refusal::NotAPlayer));
+        assert_eq!(
+            answer_draw_offer(&g, stranger, &offered.offers, true),
+            Err(Refusal::NotAPlayer)
+        );
+    }
+
+    #[test]
+    fn nobody_can_pester_their_opponent_with_the_same_offer() {
+        let (white, black, _) = ids();
+        let g = offers_game_after(&["e2e4"]);
+        let first = offer_draw(&g, white, &DrawOffers::default())
+            .unwrap()
+            .offers;
+        // Already pending.
+        assert_eq!(
+            offer_draw(&g, white, &first),
+            Err(Refusal::DrawAlreadyOffered)
+        );
+        // Declined, but still the same position: no second offer until a move has been played.
+        let declined = answer_draw_offer(&g, black, &first, false).unwrap().offers;
+        assert_eq!(
+            offer_draw(&g, white, &declined),
+            Err(Refusal::DrawAlreadyOffered)
+        );
+        let later = offers_game_after(&["e2e4", "e7e5"]);
+        assert!(offer_draw(&later, white, &declined).is_ok());
+        // The other side is not held back by White's offers.
+        assert!(offer_draw(&g, black, &declined).is_ok());
+    }
+
+    #[test]
+    fn offers_made_to_each_other_at_once_make_a_draw() {
+        let (white, black, _) = ids();
+        let g = offers_game_after(&["e2e4"]);
+        let white_offers = offer_draw(&g, white, &DrawOffers::default())
+            .unwrap()
+            .offers;
+        let both = offer_draw(&g, black, &white_offers).unwrap();
+        assert_eq!(both.ended, Some(Ended::draw(EndReason::Agreement)));
+    }
+
+    #[test]
+    fn the_recipient_moving_declines_the_offer_but_the_offerer_moving_does_not() {
+        let offers = DrawOffers {
+            pending: Some(Color::White),
+            last_offer_ply: [Some(1), None],
+        };
+        assert_eq!(
+            offers_after_move(&offers, Color::White),
+            offers,
+            "the offerer may keep playing"
+        );
+        let after = offers_after_move(&offers, Color::Black);
+        assert_eq!(after.pending, None);
+        assert_eq!(
+            after.last_offer_ply,
+            [Some(1), None],
+            "what was offered when is remembered"
+        );
+        assert_eq!(
+            offers_after_move(&DrawOffers::default(), Color::Black),
+            DrawOffers::default()
+        );
+    }
+
+    #[test]
+    fn no_offers_once_the_game_is_over() {
+        let (white, _, _) = ids();
+        // Fool's mate.
+        let g = offers_game_after(&["f2f3", "e7e5", "g2g4", "d8h4"]);
+        assert_eq!(
+            offer_draw(&g, white, &DrawOffers::default()),
+            Err(Refusal::GameOver)
+        );
     }
 }

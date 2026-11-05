@@ -874,3 +874,38 @@ async fn both_players_are_told_when_the_background_sweep_pairs_them(pool: PgPool
     let (fa, fg) = (a.expect("MATCH_FOUND").await, g.expect("MATCH_FOUND").await);
     assert_eq!(fa["game_id"], fg["game_id"]);
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn draw_offers_and_their_answers_are_pushed_to_both_players(pool: PgPool) {
+    let api = Api::with_config(pool, fast());
+    let addr = api.serve().await;
+    let (ada, grace, id) = game(&api).await;
+    let (mut a, mut g) = (
+        Client::hello(addr, &ada).await,
+        Client::hello(addr, &grace).await,
+    );
+    a.subscribe(id).await;
+    g.subscribe(id).await;
+
+    api.post(&format!("/v1/games/{id}/draw-offer"), &ada, json!({}))
+        .await;
+    for c in [&mut a, &mut g] {
+        assert_eq!(c.expect("GAME_UPDATE").await["game"]["draw_offer"], "white");
+    }
+    api.post(
+        &format!("/v1/games/{id}/draw-offer/accept"),
+        &grace,
+        json!({}),
+    )
+    .await;
+    let end = g.expect("GAME_UPDATE").await;
+    assert_eq!(
+        (
+            end["game"]["result"].as_str(),
+            end["game"]["end_reason"].as_str(),
+            end["game"]["draw_offer"].is_null()
+        ),
+        (Some("draw"), Some("agreement"), true)
+    );
+}
