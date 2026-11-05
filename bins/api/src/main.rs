@@ -56,6 +56,16 @@ async fn main() {
         state.pool.clone(),
         std::time::Duration::from_secs(1),
     );
+    // Credit players for Stellar deposits, if the platform has a wallet configured.
+    if let Some(stellar) = state.config.stellar.clone() {
+        let chain = eschess_stellar::horizon::HorizonChain::new(&stellar.horizon_url)
+            .expect("cannot build the Stellar client");
+        eschess_api::stellar_watcher::spawn_watcher(
+            state.pool.clone(),
+            std::sync::Arc::new(chain),
+            stellar,
+        );
+    }
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown())
         .await

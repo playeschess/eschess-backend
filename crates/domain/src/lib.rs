@@ -11,3 +11,4 @@ pub mod clock;
 pub mod money;
 pub mod pairing;
 pub mod rating;
+pub mod stellar;

@@ -1,4 +1,5 @@
 use eschess_domain::money::AssetId;
+use eschess_domain::stellar::AccountKey;
 use eschess_storage::identity::Lifetimes;
 
 #[derive(Clone, Debug)]
@@ -29,7 +30,27 @@ pub struct Config {
     pub ws_max_messages_per_second: u32,
     /// A custodial wallet account is created for each of these when a player signs up.
     pub wallet_assets: Vec<AssetId>,
+    /// Stellar deposits. `None` (the default) means the platform has no wallet on the network and deposits are off.
+    pub stellar: Option<StellarConfig>,
 }
+
+/// The platform's connection to the Stellar network.
+#[derive(Clone, Debug)]
+pub struct StellarConfig {
+    /// `testnet` is the only network supported for now; real money on the public network is a deliberate later step.
+    pub network: String,
+    pub horizon_url: String,
+    /// The platform wallet that receives every deposit.
+    pub hot_account: AccountKey,
+    /// The asset players deposit (USDC, from one specific issuer).
+    pub usdc: AssetId,
+    /// How often the wallet is checked for new payments.
+    pub poll_ms: u64,
+}
+
+/// Circle's USDC issuer on the Stellar testnet (https://developers.circle.com/stablecoins/usdc-on-test-networks).
+pub const TESTNET_USDC_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+pub const TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.org";
 
 impl Default for Config {
     fn default() -> Self {
@@ -43,6 +64,7 @@ impl Default for Config {
             reset_ttl_secs: 30 * 60,
             email_cooldown_secs: 60,
             wallet_assets: vec![AssetId::native()],
+            stellar: None,
             ws_hello_timeout_ms: 5_000,
             ws_ping_interval_ms: 10_000,
             ws_pong_timeout_ms: 30_000,
@@ -81,6 +103,48 @@ fn strict<T: std::str::FromStr>(
     }
 }
 
+/// Reads the Stellar settings. Deposits are on only when `STELLAR_HOT_ACCOUNT` is set.
+fn stellar_from(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<StellarConfig>, String> {
+    let Some(hot) = get("STELLAR_HOT_ACCOUNT").filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let network = get("STELLAR_NETWORK")
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "testnet".into());
+    if network != "testnet" {
+        return Err(format!(
+            "STELLAR_NETWORK: {network:?} is not supported yet; only \"testnet\" (the public network is a deliberate later step)"
+        ));
+    }
+    let hot_account =
+        AccountKey::parse(hot.trim()).map_err(|e| format!("STELLAR_HOT_ACCOUNT: {e}"))?;
+    let issuer = get("STELLAR_USDC_ISSUER")
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| TESTNET_USDC_ISSUER.into());
+    let usdc =
+        AssetId::credit("USDC", issuer.trim()).map_err(|e| format!("STELLAR_USDC_ISSUER: {e}"))?;
+    let horizon_url = get("STELLAR_HORIZON_URL")
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| TESTNET_HORIZON_URL.into());
+    if !horizon_url.starts_with("https://")
+        && !horizon_url.starts_with("http://127.0.0.1")
+        && !horizon_url.starts_with("http://localhost")
+    {
+        return Err("STELLAR_HORIZON_URL must be an https:// address".into());
+    }
+    let poll_ms = strict(get, "STELLAR_POLL_MS", 5_000u64)?;
+    if poll_ms < 500 {
+        return Err("STELLAR_POLL_MS must be at least 500".into());
+    }
+    Ok(Some(StellarConfig {
+        network,
+        horizon_url,
+        hot_account,
+        usdc,
+        poll_ms,
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         Config::from_lookup(&|name| std::env::var(name).ok())
@@ -96,6 +160,16 @@ impl Config {
                 .collect::<Result<Vec<_>, _>>()?,
             _ => d.wallet_assets.clone(),
         };
+        let stellar = stellar_from(get)?;
+        let mut wallet_assets = wallet_assets;
+        // With Stellar on, new players get a USDC wallet too (unless the list was set explicitly).
+        if let Some(st) = &stellar {
+            if get("WALLET_ASSETS").is_none_or(|l| l.trim().is_empty())
+                && !wallet_assets.contains(&st.usdc)
+            {
+                wallet_assets.push(st.usdc.clone());
+            }
+        }
         let config = Config {
             access_secs: var_from(get, "ACCESS_TOKEN_SECONDS", d.access_secs),
             refresh_secs: var_from(get, "REFRESH_TOKEN_SECONDS", d.refresh_secs),
@@ -106,6 +180,7 @@ impl Config {
             reset_ttl_secs: var_from(get, "RESET_LINK_SECONDS", d.reset_ttl_secs),
             email_cooldown_secs: var_from(get, "EMAIL_COOLDOWN_SECONDS", d.email_cooldown_secs),
             wallet_assets,
+            stellar,
             ws_hello_timeout_ms: strict(get, "WS_HELLO_TIMEOUT_MS", d.ws_hello_timeout_ms)?,
             ws_ping_interval_ms: strict(get, "WS_PING_INTERVAL_MS", d.ws_ping_interval_ms)?,
             ws_pong_timeout_ms: strict(get, "WS_PONG_TIMEOUT_MS", d.ws_pong_timeout_ms)?,
@@ -248,5 +323,66 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("WS_PONG_TIMEOUT_MS"), "{e}");
         assert!(Config::default().check_realtime().is_ok());
+    }
+
+    const HOT: &str = "GBL4BGHUU6TAX7WXPSXAES7XBKEPJWLOO3HBIOYHNJH4KMLQZIQVZIF5";
+
+    #[test]
+    fn deposits_are_off_unless_a_wallet_is_configured() {
+        let c = load(&[]).unwrap();
+        assert!(c.stellar.is_none());
+        assert_eq!(c.wallet_assets, vec![AssetId::native()]);
+    }
+
+    #[test]
+    fn a_configured_wallet_turns_deposits_on_with_testnet_usdc_by_default() {
+        let c = load(&[("STELLAR_HOT_ACCOUNT", HOT)]).unwrap();
+        let st = c.stellar.unwrap();
+        assert_eq!(
+            (st.network.as_str(), st.horizon_url.as_str(), st.poll_ms),
+            ("testnet", TESTNET_HORIZON_URL, 5_000)
+        );
+        assert_eq!(st.usdc.to_string(), format!("USDC:{TESTNET_USDC_ISSUER}"));
+        assert_eq!(st.hot_account.to_g(), HOT);
+        // New players get a USDC wallet as well as the XLM one.
+        assert!(c.wallet_assets.contains(&st.usdc) && c.wallet_assets.len() == 2);
+        // An explicit list is respected as it is.
+        let explicit = load(&[("STELLAR_HOT_ACCOUNT", HOT), ("WALLET_ASSETS", "XLM")]).unwrap();
+        assert_eq!(explicit.wallet_assets, vec![AssetId::native()]);
+    }
+
+    #[test]
+    fn stellar_settings_that_could_lose_money_are_refused() {
+        assert!(load(&[("STELLAR_HOT_ACCOUNT", "GNOTANACCOUNT")])
+            .unwrap_err()
+            .contains("STELLAR_HOT_ACCOUNT"));
+        assert!(
+            load(&[(
+                "STELLAR_HOT_ACCOUNT",
+                "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUAAAAAAAAAAAACJUQ"
+            )])
+            .is_err(),
+            "the wallet is a plain account"
+        );
+        assert!(
+            load(&[("STELLAR_HOT_ACCOUNT", HOT), ("STELLAR_NETWORK", "public")])
+                .unwrap_err()
+                .contains("not supported yet")
+        );
+        assert!(load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("STELLAR_USDC_ISSUER", "GABC")
+        ])
+        .unwrap_err()
+        .contains("STELLAR_USDC_ISSUER"));
+        assert!(
+            load(&[
+                ("STELLAR_HOT_ACCOUNT", HOT),
+                ("STELLAR_HORIZON_URL", "http://example.com")
+            ])
+            .is_err(),
+            "no plain http to a remote server"
+        );
+        assert!(load(&[("STELLAR_HOT_ACCOUNT", HOT), ("STELLAR_POLL_MS", "10")]).is_err());
     }
 }
