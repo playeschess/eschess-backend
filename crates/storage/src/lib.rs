@@ -3,6 +3,7 @@
 pub mod games;
 pub mod identity;
 pub mod ledger;
+pub mod matchmaking;
 pub mod ratings;
 
 use sqlx::postgres::PgPoolOptions;

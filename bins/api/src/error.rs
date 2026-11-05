@@ -135,6 +135,10 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "too_many_open_games",
                 "you already have the most open games allowed; cancel one or wait for an opponent",
             ),
+            AlreadyMatched => conflict(
+                "already_matched",
+                "a game was already found for you; see GET /v1/matchmaking",
+            ),
             NotStarted => conflict(
                 "game_not_started",
                 "the game has not started: it is waiting for an opponent",

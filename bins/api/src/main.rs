@@ -51,6 +51,11 @@ async fn main() {
     };
     // Listen for game changes made by any server, and push them to the players connected to this one.
     eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());
+    // Pair waiting players as their acceptable rating gap widens.
+    eschess_api::routes::matchmaking::spawn_matchmaker(
+        state.pool.clone(),
+        std::time::Duration::from_secs(1),
+    );
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown())
         .await
