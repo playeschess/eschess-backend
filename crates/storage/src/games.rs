@@ -24,6 +24,8 @@ pub enum GameError {
     OwnGame,
     /// The creator already has the most open games a player may have.
     TooManyOpenGames,
+    /// Leaving the matchmaking queue after a game was already found.
+    AlreadyMatched,
     /// Moving in a game that is still waiting for an opponent.
     NotStarted,
     /// The player's app reused a `client_move_id` for a different move.
@@ -43,6 +45,7 @@ impl fmt::Display for GameError {
             GameError::TooManyOpenGames => {
                 write!(f, "you already have {MAX_OPEN_GAMES} open games")
             }
+            GameError::AlreadyMatched => write!(f, "a game was already found for you"),
             GameError::NotStarted => {
                 write!(f, "the game has not started: it is waiting for an opponent")
             }
@@ -722,4 +725,46 @@ pub async fn flag_due(pool: &PgPool, id: Uuid) -> Result<bool> {
     .fetch_optional(pool)
     .await?;
     Ok(due.unwrap_or(false))
+}
+
+/// Creates a game that starts at once between two players, for matchmaking. `first` is the one who has waited longer and
+/// is recorded as the creator. Runs inside the caller's transaction.
+pub(crate) async fn start_matched(
+    db: &mut PgConnection,
+    first: Uuid,
+    second: Uuid,
+    control: TimeControl,
+    rated: bool,
+    first_plays_white: bool,
+) -> Result<Uuid> {
+    let id = Uuid::now_v7();
+    let now = now_ms(db).await?;
+    let clock = Clock::start(control, LagPolicy::default(), now as u64).state();
+    let (white, black) = if first_plays_white {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    sqlx::query(
+        "INSERT INTO games (id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, fen,
+             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13,$14,now(),1)",
+    )
+    .bind(id)
+    .bind(first)
+    .bind(if first_plays_white { "white" } else { "black" })
+    .bind(rated)
+    .bind(white)
+    .bind(black)
+    .bind(control.base_ms() as i64)
+    .bind(control.increment_ms() as i64)
+    .bind(Position::starting().to_fen())
+    .bind(clock.remaining_ms[0] as i64)
+    .bind(clock.remaining_ms[1] as i64)
+    .bind(clock.lag_quota_ms[0] as i64)
+    .bind(clock.lag_quota_ms[1] as i64)
+    .bind(now)
+    .execute(&mut *db)
+    .await?;
+    Ok(id)
 }

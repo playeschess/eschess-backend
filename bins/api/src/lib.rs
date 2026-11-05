@@ -51,6 +51,12 @@ pub fn app(state: AppState) -> Router {
             delete(routes::auth::revoke_session),
         )
         .route("/v1/me", get(routes::me::me))
+        .route(
+            "/v1/matchmaking",
+            post(routes::matchmaking::join)
+                .get(routes::matchmaking::status)
+                .delete(routes::matchmaking::leave),
+        )
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

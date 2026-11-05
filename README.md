@@ -55,6 +55,9 @@ POST   /v1/games/{id}/cancel    withdraw a game nobody has joined
 POST   /v1/games/{id}/moves     play a move: {"uci":"e2e4","client_move_id":"<uuid>"}; a retry with the same id is safe
 POST   /v1/games/{id}/resign    resign
 POST   /v1/games/{id}/claim-draw  claim a draw by threefold repetition or the fifty-move rule
+POST   /v1/matchmaking           ask for a game: {time_control, rated?}; paired at once if someone suitable waits
+GET    /v1/matchmaking           still waiting, or the game that was found
+DELETE /v1/matchmaking           leave the queue (not possible once a game was found)
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -159,3 +162,19 @@ from the time control), starting at 1500 with deviation 350.
 - A rating is `provisional` while its deviation is above 110. The leaderboard lists only established players.
 - **Rated or casual.** The creator chooses when opening a game (`"rated": false` for casual; rated is the default). The
   choice is shown on the game, lobby included, and cannot change afterwards. Casual games never touch ratings.
+
+## Matchmaking (crates/domain, crates/storage, bins/api)
+
+Players who just want a game join a queue (`POST /v1/matchmaking`) instead of opening a game and waiting in the lobby.
+
+- **Who meets whom** is the pure `eschess_domain::pairing`: only players who asked for the same time control and the
+  same rated/casual choice can meet, and their ratings must be close. The acceptable gap starts at 100 points and grows by
+  25 per second waited, up to 800, and both players' windows must allow it (the narrower decides), so nobody is thrown
+  at a much stronger opponent the moment they arrive. The longest waiter is served first and gets the closest rating.
+- **Pairing happens** when a player joins, and again every second in a background task, so people are matched as their
+  windows widen. One database lock serialises pairing, so two servers never pair the same player twice.
+- **A found game** starts immediately; the player who waited longer is recorded as its creator and colours are random.
+  Both players' queue rows keep the game id for ten minutes, so a player who was not looking can still find it with
+  `GET /v1/matchmaking`. Someone waiting more than two minutes is dropped. A player has at most one place in the queue;
+  asking again replaces the earlier request.
+- A "match found" push over the WebSocket is not built yet: clients poll `GET /v1/matchmaking` for now.

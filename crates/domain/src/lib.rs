@@ -9,4 +9,5 @@
 pub mod chess;
 pub mod clock;
 pub mod money;
+pub mod pairing;
 pub mod rating;

@@ -56,6 +56,15 @@ pub struct TimeControlBody {
     increment_seconds: u64,
 }
 
+impl TimeControlBody {
+    pub(crate) fn base_seconds(&self) -> u64 {
+        self.base_seconds
+    }
+    pub(crate) fn increment_seconds(&self) -> u64 {
+        self.increment_seconds
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateBody {
     time_control: TimeControlBody,
