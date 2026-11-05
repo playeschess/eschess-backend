@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/domain", "crates/ledger", "crates/auth", "crates/game", "crates/notification", "crates/storage", "bins/api", "bins/migrate"]
+members = ["crates/domain", "crates/ledger", "crates/auth", "crates/game", "crates/notification", "crates/stellar", "crates/storage", "bins/api", "bins/migrate"]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,6 +26,7 @@ argon2 = "0.5"
 async-trait = "0.1"
 rand = "0.8"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "uuid"] }
 
 # Password hashing is deliberately slow; keep it usable in debug builds and tests.

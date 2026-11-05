@@ -5,6 +5,7 @@ pub mod identity;
 pub mod ledger;
 pub mod matchmaking;
 pub mod ratings;
+pub mod stellar;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;

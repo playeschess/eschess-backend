@@ -1,6 +1,7 @@
 use std::fmt;
 
 use super::MoneyError;
+use crate::stellar::{base32_decode, crc16_xmodem};
 
 /// A Stellar asset: the native lumen, or a credit asset identified by its code *and* issuer account.
 ///
@@ -93,41 +94,6 @@ fn valid_account_id(s: &str) -> bool {
     }
     let checksum = crc16_xmodem(&bytes[..33]);
     bytes[33] == (checksum & 0xff) as u8 && bytes[34] == (checksum >> 8) as u8
-}
-
-fn base32_decode(s: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len() * 5 / 8);
-    let (mut buffer, mut bits) = (0u32, 0u32);
-    for c in s.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'2'..=b'7' => c - b'2' + 26,
-            _ => return None,
-        } as u32;
-        buffer = (buffer << 5) | v;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
-}
-
-fn crc16_xmodem(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0;
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x1021
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
 }
 
 #[cfg(test)]

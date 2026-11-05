@@ -10,6 +10,7 @@ publish.workspace = true
 eschess-domain = { path = "../domain" }
 eschess-game = { path = "../game" }
 eschess-ledger = { path = "../ledger" }
+eschess-stellar = { path = "../stellar" }
 sqlx.workspace = true
 tokio.workspace = true
 uuid.workspace = true

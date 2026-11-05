@@ -11,6 +11,7 @@ pub mod error;
 pub mod extract;
 pub mod hub;
 pub mod routes;
+pub mod stellar_watcher;
 pub mod ws;
 
 pub use config::Config;
@@ -57,6 +58,8 @@ pub fn app(state: AppState) -> Router {
                 .get(routes::matchmaking::status)
                 .delete(routes::matchmaking::leave),
         )
+        .route("/v1/wallet/deposit-info", get(routes::wallet::deposit_info))
+        .route("/v1/wallet/deposits", get(routes::wallet::deposits))
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

@@ -61,6 +61,8 @@ POST   /v1/games/{id}/draw-offer/decline decline the offer made to you, or withd
 POST   /v1/matchmaking           ask for a game: {time_control, rated?}; paired at once if someone suitable waits
 GET    /v1/matchmaking           still waiting, or the game that was found
 DELETE /v1/matchmaking           leave the queue (not possible once a game was found)
+GET    /v1/wallet/deposit-info   how to deposit USDC: an M... address, or the wallet address plus a memo (needs a confirmed email)
+GET    /v1/wallet/deposits       your deposits, newest first
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -199,3 +201,26 @@ every change is pushed to both players as an ordinary `GAME_UPDATE`.
   been played. If both sides offer at once, that is an agreement.
 - An agreed draw is rated like any other result (rated games of at least 4 plies).
 - Offers are made over REST only; over the WebSocket there is no draw message, but both players see the offer arrive.
+
+## Stellar deposits (crates/stellar, crates/storage, bins/api) — testnet only
+
+Players deposit **USDC on the Stellar testnet** (Circle's issuer, `GBBD47IF…LA5`; a same-named asset from another issuer is a
+different asset and is not accepted). Deposits are off unless `STELLAR_HOT_ACCOUNT` is set (see `.env.example`); the public
+network is refused on purpose until it is a deliberate step.
+
+- **One platform wallet, a deposit id per player.** All funds sit in a single Stellar account (the "hot wallet"). Each player
+  has a deposit id, and `GET /v1/wallet/deposit-info` gives two equivalent ways to pay: an **`M...` muxed address** (the wallet
+  with the id built in, SEP-23; nothing to forget) or the plain wallet address with the id as a **memo**. Either way the
+  payment names the player. A text memo, the sender's address and the like are never trusted.
+- **Watching the wallet.** A background task reads the wallet's payments from Horizon (behind the `Chain` trait, so the
+  provider can change and tests use a fake), after a saved cursor, and credits players through the ledger: debit the platform's
+  `custody_stellar` account (which mirrors what the wallet holds), credit the player's wallet. Only one server polls at a
+  time (a database lock). The cursor moves forward only after a whole page is dealt with.
+- **Exactly once, whatever crashes.** Each payment is recorded under Horizon's operation id (the primary key), posted to the
+  ledger under an idempotency key derived from the same id, then marked credited. Handling the same payment again, at once or
+  after a crash between any two steps, never pays twice.
+- **Never a guess.** A payment with no deposit id, an unknown or conflicting one, an asset we do not accept, or a record we
+  could not read is kept as `needs_review` with the reason, not credited and not dropped.
+- **Not built yet:** withdrawals (sending USDC out) and the naira on/off ramp. Muxed destinations are read from Horizon's
+  `to_muxed_id` field when present, and the memo path is the dependable one until a real muxed payment has been checked
+  against the live testnet.
