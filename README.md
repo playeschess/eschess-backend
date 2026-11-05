@@ -129,6 +129,7 @@ server -> MOVE_ACCEPTED {client_move_id, game_id, ply, uci, replayed, measured_l
       or MOVE_REJECTED  {client_move_id, game_id, code, message}
 server -> CLOCK_SYNC    {game_id, event_seq, turn, clock}  every few seconds, to correct a drifting clock
 server -> PING {id, server_time_ms}    client -> PONG {id}
+server -> MATCH_FOUND   {game_id}                          matchmaking paired you (on every device you are connected with)
 server -> ERROR         {code, message, game_id?}
 client -> UNSUBSCRIBE   {game_id}
 ```
@@ -177,4 +178,7 @@ Players who just want a game join a queue (`POST /v1/matchmaking`) instead of op
   Both players' queue rows keep the game id for ten minutes, so a player who was not looking can still find it with
   `GET /v1/matchmaking`. Someone waiting more than two minutes is dropped. A player has at most one place in the queue;
   asking again replaces the earlier request.
-- A "match found" push over the WebSocket is not built yet: clients poll `GET /v1/matchmaking` for now.
+- **Push.** A connected player is sent `MATCH_FOUND {game_id}` over the WebSocket the moment they are paired, on any
+  server (it travels through Postgres `LISTEN/NOTIFY` like game updates, and only once the pairing commits). The push is
+  a convenience, not the source of truth: a client that was offline, or whose connection dropped, finds the game with
+  `GET /v1/matchmaking`.

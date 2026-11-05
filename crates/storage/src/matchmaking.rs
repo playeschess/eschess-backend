@@ -83,6 +83,13 @@ async fn pair_waiting(
                 .bind(vec![first, second])
                 .execute(&mut *db)
                 .await?;
+            // Tell each player (on whichever server they are connected to) once this commits.
+            for user in [first, second] {
+                sqlx::query("SELECT pg_notify('user_events', $1)")
+                    .bind(format!("{user}:{game}"))
+                    .execute(&mut *db)
+                    .await?;
+            }
             made += 1;
         }
     }
