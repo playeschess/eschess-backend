@@ -149,8 +149,8 @@ client -> UNSUBSCRIBE   {game_id}
   but cannot be abused.
 - **Housekeeping.** Silent connections are closed (no PONG within 30 s), tokens are re-checked every few seconds so
   signing out closes the socket, and oversized messages, floods, repeated garbage and too many subscriptions are cut
-  off. The limits are the `ws_*` fields of `Config` (`bins/api/src/config.rs`); they have sensible defaults and are not yet
-  read from the environment.
+  off. The limits are the `WS_*` settings in `.env.example` (all optional, with sensible defaults). A typo, a zero, or a pong
+  timeout no longer than the ping interval stops the server from starting rather than running with a broken limit.
 
 ## Ratings (crates/domain, crates/storage)
 
