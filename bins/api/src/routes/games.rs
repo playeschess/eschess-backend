@@ -41,7 +41,7 @@ pub(crate) fn game_json(g: &GameView) -> Value {
         "time_control": { "base_ms": g.base_ms, "increment_ms": g.increment_ms, "category": category.ok() },
         "rated": g.rated, "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
         "clock": { "white_ms": g.white_ms, "black_ms": g.black_ms, "as_of_ms": g.as_of_ms },
-        "result": g.result, "end_reason": g.end_reason, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
+        "result": g.result, "end_reason": g.end_reason, "draw_offer": g.draw_offer, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
     })
 }
 
@@ -208,6 +208,39 @@ pub async fn resign(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(game_json(
         &games::resign(&state.pool, id, user.user_id).await?,
+    )))
+}
+
+/// Offers the opponent a draw (or agrees one, if they had already offered).
+pub async fn offer_draw(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(game_json(
+        &games::offer_draw(&state.pool, id, user.user_id).await?,
+    )))
+}
+
+/// Accepts the draw offer made to you: the game ends as a draw by agreement.
+pub async fn accept_draw_offer(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(game_json(
+        &games::answer_draw_offer(&state.pool, id, user.user_id, true).await?,
+    )))
+}
+
+/// Declines the draw offer made to you, or withdraws your own.
+pub async fn decline_draw_offer(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(game_json(
+        &games::answer_draw_offer(&state.pool, id, user.user_id, false).await?,
     )))
 }
 

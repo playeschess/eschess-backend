@@ -155,6 +155,17 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "nothing_to_claim",
                 "there is no draw to claim in this position",
             ),
+            Refused(Refusal::DrawAlreadyOffered) => conflict(
+                "draw_already_offered",
+                "you have already offered a draw in this position",
+            ),
+            Refused(Refusal::NoDrawOffer) => {
+                conflict("no_draw_offer", "there is no draw offer to answer")
+            }
+            Refused(Refusal::OwnDrawOffer) => conflict(
+                "own_draw_offer",
+                "you cannot accept your own draw offer; the opponent must",
+            ),
             Refused(Refusal::InvalidNotation) => ApiError::Coded(
                 StatusCode::BAD_REQUEST,
                 "invalid_move_notation",

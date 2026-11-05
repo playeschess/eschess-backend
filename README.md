@@ -55,6 +55,9 @@ POST   /v1/games/{id}/cancel    withdraw a game nobody has joined
 POST   /v1/games/{id}/moves     play a move: {"uci":"e2e4","client_move_id":"<uuid>"}; a retry with the same id is safe
 POST   /v1/games/{id}/resign    resign
 POST   /v1/games/{id}/claim-draw  claim a draw by threefold repetition or the fifty-move rule
+POST   /v1/games/{id}/draw-offer         offer the opponent a draw
+POST   /v1/games/{id}/draw-offer/accept  accept the offer made to you: the game is drawn by agreement
+POST   /v1/games/{id}/draw-offer/decline decline the offer made to you, or withdraw your own
 POST   /v1/matchmaking           ask for a game: {time_control, rated?}; paired at once if someone suitable waits
 GET    /v1/matchmaking           still waiting, or the game that was found
 DELETE /v1/matchmaking           leave the queue (not possible once a game was found)
@@ -182,3 +185,17 @@ Players who just want a game join a queue (`POST /v1/matchmaking`) instead of op
   server (it travels through Postgres `LISTEN/NOTIFY` like game updates, and only once the pairing commits). The push is
   a convenience, not the source of truth: a client that was offline, or whose connection dropped, finds the game with
   `GET /v1/matchmaking`.
+
+## Draw offers (crates/game, crates/storage)
+
+A player may offer a draw at any time in a game that is going, whoever's turn it is; the rules are the pure
+`eschess_game::DrawOffers`. The game JSON carries `draw_offer` (the colour that has an offer waiting, or null), and
+every change is pushed to both players as an ordinary `GAME_UPDATE`.
+
+- The opponent accepts (the game ends as a draw, `end_reason: "agreement"`) or declines. The offerer may decline their own
+  offer to withdraw it.
+- **A move by the player the offer was made to counts as declining it.** The offerer may keep playing; their offer stays.
+- **No pestering:** each side may offer once per position. After an offer is turned down, a new one needs a move to have
+  been played. If both sides offer at once, that is an agreement.
+- An agreed draw is rated like any other result (rated games of at least 4 plies).
+- Offers are made over REST only; over the WebSocket there is no draw message, but both players see the offer arrive.

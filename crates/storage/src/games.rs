@@ -8,7 +8,9 @@ use std::fmt;
 
 use eschess_domain::chess::{Color, Move, Position};
 use eschess_domain::clock::{Clock, ClockState, LagPolicy, TimeControl};
-use eschess_game::{ActiveGame, Ended, MoveOutcome, Refusal};
+use eschess_game::{
+    offers_after_move, ActiveGame, Answered, DrawOffers, Ended, MoveOutcome, Refusal,
+};
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::ratings;
@@ -111,6 +113,8 @@ pub struct GameView {
     pub as_of_ms: i64,
     pub result: Option<String>,
     pub end_reason: Option<String>,
+    /// The colour that has a draw offer waiting ("white" or "black"), if any.
+    pub draw_offer: Option<String>,
     /// The moves the viewer may play right now: only filled in when it is their turn.
     pub legal_moves: Vec<String>,
 }
@@ -144,9 +148,11 @@ struct GameRow {
     remaining: [i64; 2],
     quota: [i64; 2],
     turn_started_at_ms: Option<i64>,
+    draw_offered_by: Option<String>,
+    offer_ply: [Option<i32>; 2],
 }
 
-const COLS: &str = "id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms";
+const COLS: &str = "id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
@@ -167,6 +173,8 @@ fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
         remaining: [r.get("white_remaining_ms"), r.get("black_remaining_ms")],
         quota: [r.get("white_lag_quota_ms"), r.get("black_lag_quota_ms")],
         turn_started_at_ms: r.get("turn_started_at_ms"),
+        draw_offered_by: r.get("draw_offered_by"),
+        offer_ply: [r.get("white_offer_ply"), r.get("black_offer_ply")],
     }
 }
 
@@ -245,7 +253,7 @@ async fn notify(db: &mut PgConnection, id: Uuid) -> Result<()> {
 
 async fn finish(db: &mut PgConnection, id: Uuid, ended: Ended) -> Result<()> {
     notify(db, id).await?;
-    sqlx::query("UPDATE games SET status = 'finished', result = $2, end_reason = $3, ended_at = now(), event_seq = event_seq + 1 WHERE id = $1 AND status = 'active'")
+    sqlx::query("UPDATE games SET status = 'finished', result = $2, end_reason = $3, ended_at = now(), draw_offered_by = NULL, event_seq = event_seq + 1 WHERE id = $1 AND status = 'active'")
         .bind(id)
         .bind(ended.result.as_str())
         .bind(ended.reason.as_str())
@@ -377,6 +385,7 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
         as_of_ms: now,
         result: row.result.clone(),
         end_reason: row.end_reason.clone(),
+        draw_offer: row.draw_offered_by.clone(),
         legal_moves,
     })
 }
@@ -639,7 +648,7 @@ pub async fn play_move(
                 .execute(&mut *tx)
                 .await?;
             sqlx::query(
-                "UPDATE games SET fen = $2, ply = $3, white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, turn_started_at_ms = $8, event_seq = event_seq + 1 WHERE id = $1",
+                "UPDATE games SET fen = $2, ply = $3, white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, turn_started_at_ms = $8, draw_offered_by = $9, event_seq = event_seq + 1 WHERE id = $1",
             )
             .bind(id)
             .bind(&applied.fen_after)
@@ -649,6 +658,7 @@ pub async fn play_move(
             .bind(state.lag_quota_ms[0] as i64)
             .bind(state.lag_quota_ms[1] as i64)
             .bind(state.turn_started_at_ms as i64)
+            .bind(offers_after_move(&offers_of(&row), mover).pending.map(color_name))
             .execute(&mut *tx)
             .await?;
             notify(&mut tx, id).await?;
@@ -667,6 +677,90 @@ pub async fn play_move(
             Ok((view(&mut conn, id, actor).await?, receipt))
         }
     }
+}
+
+fn color_name(c: Color) -> &'static str {
+    match c {
+        Color::White => "white",
+        Color::Black => "black",
+    }
+}
+
+fn offers_of(row: &GameRow) -> DrawOffers {
+    DrawOffers {
+        pending: match row.draw_offered_by.as_deref() {
+            Some("white") => Some(Color::White),
+            Some("black") => Some(Color::Black),
+            _ => None,
+        },
+        last_offer_ply: [
+            row.offer_ply[0].map(|p| p as u32),
+            row.offer_ply[1].map(|p| p as u32),
+        ],
+    }
+}
+
+/// Makes a draw offer, or, if the opponent already has one waiting, agrees the draw.
+pub async fn offer_draw(pool: &PgPool, id: Uuid, actor: Uuid) -> Result<GameView> {
+    change_offers(pool, id, actor, |game, offers| {
+        eschess_game::offer_draw(game, actor, offers)
+    })
+    .await
+}
+
+/// Accepts (the game is drawn) or declines the draw offer waiting for the player. The player who made the offer may
+/// decline it too, which withdraws it.
+pub async fn answer_draw_offer(
+    pool: &PgPool,
+    id: Uuid,
+    actor: Uuid,
+    accept: bool,
+) -> Result<GameView> {
+    change_offers(pool, id, actor, |game, offers| {
+        eschess_game::answer_draw_offer(game, actor, offers, accept)
+    })
+    .await
+}
+
+async fn change_offers(
+    pool: &PgPool,
+    id: Uuid,
+    actor: Uuid,
+    decide: impl FnOnce(&ActiveGame, &DrawOffers) -> std::result::Result<Answered, Refusal>,
+) -> Result<GameView> {
+    let mut tx = pool.begin().await?;
+    let (row, moves, now) = lock_for_player(&mut tx, id, actor).await?;
+    if row.status != "active" {
+        return Err(if row.status == "waiting" {
+            GameError::NotStarted
+        } else {
+            GameError::Refused(Refusal::GameOver)
+        });
+    }
+    if settle_flag(&mut tx, &row, &moves, now).await?.is_some() {
+        tx.commit().await?;
+        return Err(GameError::Refused(Refusal::GameOver));
+    }
+    let game = active_game(&row, &moves)?;
+    let answered = decide(&game, &offers_of(&row))?;
+    if let Some(ended) = answered.ended {
+        finish(&mut tx, id, ended).await?;
+    }
+    // (A finished game has its offer cleared by `finish`; the offer bookkeeping below is harmless for it.)
+    sqlx::query("UPDATE games SET draw_offered_by = $2, white_offer_ply = $3, black_offer_ply = $4, event_seq = event_seq + $5 WHERE id = $1")
+        .bind(id)
+        .bind(answered.offers.pending.map(color_name).filter(|_| answered.ended.is_none()))
+        .bind(answered.offers.last_offer_ply[0].map(|p| p as i32))
+        .bind(answered.offers.last_offer_ply[1].map(|p| p as i32))
+        .bind(if answered.ended.is_some() { 0 } else { 1 })
+        .execute(&mut *tx)
+        .await?;
+    if answered.ended.is_none() {
+        notify(&mut tx, id).await?;
+    }
+    tx.commit().await?;
+    let mut conn = pool.acquire().await?;
+    view(&mut conn, id, actor).await
 }
 
 async fn end_by_player(
