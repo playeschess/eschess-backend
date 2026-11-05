@@ -20,6 +20,16 @@ pub struct Api {
     pub app: Router,
     pub pool: PgPool,
     pub state: AppState,
+    /// Background tasks started by `serve`, stopped when the test ends so they do not hold the test database open.
+    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for Api {
+    fn drop(&mut self) {
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }
 }
 
 impl Api {
@@ -38,6 +48,7 @@ impl Api {
             app: app(state.clone()),
             pool,
             state,
+            tasks: Default::default(),
         }
     }
 
@@ -46,11 +57,15 @@ impl Api {
     pub async fn serve(&self) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        eschess_api::hub::spawn_listener(self.state.hub.clone(), self.pool.clone());
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.push(eschess_api::hub::spawn_listener(
+            self.state.hub.clone(),
+            self.pool.clone(),
+        ));
         let router = self.app.clone();
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
-        });
+        }));
         addr
     }
 

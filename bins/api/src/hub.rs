@@ -124,6 +124,17 @@ impl Hub {
             .unwrap_or_default()
     }
 
+    /// The open connections of one player (they may be signed in on several devices).
+    pub fn connections_of(&self, user: Uuid) -> Vec<u64> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .conns
+            .iter()
+            .filter(|(_, c)| c.user == user)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// (connection, player) for everyone watching `game`.
     pub fn watchers(&self, game: Uuid) -> Vec<(u64, Uuid)> {
         let inner = self.inner.lock().unwrap();
@@ -188,6 +199,20 @@ async fn push_to(hub: &Hub, pool: &PgPool, game: Uuid, conn: u64, user: Uuid) {
     }
 }
 
+/// Tells a player, on every device they are connected with, that matchmaking found them a game.
+fn push_match_found(hub: &Hub, payload: &str) {
+    let Some((user, game)) = payload.split_once(':') else {
+        return;
+    };
+    let (Ok(user), Ok(game)) = (user.parse::<Uuid>(), game.parse::<Uuid>()) else {
+        return;
+    };
+    let message = json!({ "type": "MATCH_FOUND", "game_id": game }).to_string();
+    for conn in hub.connections_of(user) {
+        hub.send(conn, message.clone());
+    }
+}
+
 /// Starts this server's side of the live-update system: listens for game changes announced by any server (including
 /// this one) and pushes the new state to everyone connected here who is watching that game.
 pub fn spawn_listener(hub: Hub, pool: PgPool) -> tokio::task::JoinHandle<()> {
@@ -201,8 +226,8 @@ pub fn spawn_listener(hub: Hub, pool: PgPool) -> tokio::task::JoinHandle<()> {
                     continue;
                 }
             };
-            if let Err(e) = listener.listen("game_events").await {
-                tracing::warn!("cannot listen on game_events: {e}; retrying");
+            if let Err(e) = listener.listen_all(["game_events", "user_events"]).await {
+                tracing::warn!("cannot listen for game and player events: {e}; retrying");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -213,8 +238,16 @@ pub fn spawn_listener(hub: Hub, pool: PgPool) -> tokio::task::JoinHandle<()> {
             loop {
                 match listener.recv().await {
                     Ok(notification) => {
-                        if let Ok(game) = notification.payload().parse::<Uuid>() {
-                            push_game(&hub, &pool, game).await;
+                        match notification.channel() {
+                            // The payload is a game id: tell everyone watching it.
+                            "game_events" => {
+                                if let Ok(game) = notification.payload().parse::<Uuid>() {
+                                    push_game(&hub, &pool, game).await;
+                                }
+                            }
+                            // The payload is "<player id>:<game id>": matchmaking found this player a game.
+                            "user_events" => push_match_found(&hub, notification.payload()),
+                            _ => {}
                         }
                     }
                     Err(e) => {

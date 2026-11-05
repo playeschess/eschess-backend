@@ -799,3 +799,78 @@ async fn misbehaving_clients_are_cut_off(pool: PgPool) {
         .await;
     assert_eq!(c.expect("ERROR").await["code"], "too_many_subscriptions");
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_waiting_player_is_told_the_moment_matchmaking_finds_a_game(pool: PgPool) {
+    // The waiting clients only answer pings while being read, so allow them a long silence.
+    let config = Config {
+        ws_pong_timeout_ms: 20_000,
+        ..fast()
+    };
+    let one = Api::with_config(pool, config);
+    let two = one.another_server();
+    let (addr_one, addr_two) = (one.serve().await, two.serve().await);
+    let (ada, grace, linus) = (
+        one.player("ada").await,
+        one.player("grace").await,
+        one.player("linus").await,
+    );
+    let body = json!({ "time_control": { "base_seconds": 300 } });
+
+    // Ada waits on server two; Linus is connected too but is not in the queue.
+    let mut a = Client::hello(addr_two, &ada).await;
+    let mut l = Client::hello(addr_one, &linus).await;
+    assert_eq!(
+        one.post("/v1/matchmaking", &ada, body.clone()).await.1["status"],
+        "queued"
+    );
+
+    // Grace asks through server one; Ada, on server two, is told, with the id of the game.
+    let (_, matched) = one.post("/v1/matchmaking", &grace, body.clone()).await;
+    let game = matched["game"]["id"].as_str().unwrap().to_string();
+    let found = a.expect("MATCH_FOUND").await;
+    assert_eq!(found["game_id"], game.as_str());
+    assert!(
+        l.quiet_for(300).await.is_empty(),
+        "a player who is not in the match hears nothing"
+    );
+
+    // What she is told is enough to start playing: subscribe and she has the game.
+    let id: Uuid = game.parse().unwrap();
+    assert_eq!(a.subscribe(id).await["game"]["status"], "active");
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn both_players_are_told_when_the_background_sweep_pairs_them(pool: PgPool) {
+    let config = Config {
+        ws_pong_timeout_ms: 20_000,
+        ..fast()
+    };
+    let api = Api::with_config(pool, config);
+    let addr = api.serve().await;
+    let (ada, grace) = (api.player("ada").await, api.player("grace").await);
+    for (name, rating) in [("ada", 1500.0), ("grace", 1900.0)] {
+        sqlx::query("INSERT INTO ratings (user_id, category, rating, deviation, volatility) SELECT id, 'blitz', $2, 60, 0.06 FROM users WHERE username = $1")
+            .bind(name).bind(rating).execute(&api.pool).await.unwrap();
+    }
+    let body = json!({ "time_control": { "base_seconds": 300 } });
+    let (mut a, mut g) = (
+        Client::hello(addr, &ada).await,
+        Client::hello(addr, &grace).await,
+    );
+    api.post("/v1/matchmaking", &ada, body.clone()).await;
+    api.post("/v1/matchmaking", &grace, body).await;
+    assert!(a.quiet_for(300).await.is_empty(), "too far apart for now");
+
+    sqlx::query("UPDATE match_queue SET joined_at = joined_at - interval '20 seconds'")
+        .execute(&api.pool)
+        .await
+        .unwrap();
+    eschess_storage::matchmaking::sweep(&api.pool, &mut || true)
+        .await
+        .unwrap();
+    let (fa, fg) = (a.expect("MATCH_FOUND").await, g.expect("MATCH_FOUND").await);
+    assert_eq!(fa["game_id"], fg["game_id"]);
+}

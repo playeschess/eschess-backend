@@ -13,6 +13,7 @@
 //!        or MOVE_REJECTED {client_move_id, game_id, code, message}
 //! server -> CLOCK_SYNC   {game_id, event_seq, turn, clock}    every few seconds, to correct a drifting clock
 //! server -> PING {id, server_time_ms}    client -> PONG {id}  the server times the round trip to measure lag
+//! server -> MATCH_FOUND  {game_id}                            matchmaking paired you; SUBSCRIBE to it and play
 //! server -> ERROR        {code, message, game_id?}
 //! ```
 //!
