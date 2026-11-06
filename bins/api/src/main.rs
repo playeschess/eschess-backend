@@ -43,7 +43,7 @@ async fn main() {
         .await
         .expect("cannot bind");
     tracing::info!("eschess-api listening on {bind}");
-    // The Stellar network, if the platform has a wallet on it: watched for deposits, and asked about withdrawal destinations.
+    // The Stellar network, if the platform has a wallet on it: asked about withdrawal destinations.
     let chain: Option<Arc<dyn eschess_stellar::Chain>> = config.stellar.as_ref().map(|st| {
         Arc::new(
             eschess_stellar::horizon::HorizonChain::new(&st.horizon_url)
@@ -64,10 +64,8 @@ async fn main() {
         state.pool.clone(),
         std::time::Duration::from_secs(1),
     );
-    // Credit players for Stellar deposits, if the platform has a wallet configured.
-    if let (Some(stellar), Some(chain)) = (state.config.stellar.clone(), state.chain.clone()) {
-        eschess_api::stellar_watcher::spawn_watcher(state.pool.clone(), chain, stellar);
-    }
+    // Deposits and withdrawals are handled by the worker (`make worker`), not here: a settlement retry storm must not
+    // slow the move loop.
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown())
         .await
