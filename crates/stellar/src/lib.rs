@@ -96,4 +96,23 @@ pub trait Chain: Send + Sync {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Page, ChainError>;
+
+    /// The account's current state, or `None` if it does not exist on the network (it has never been funded).
+    async fn account(&self, account: &str) -> Result<Option<AccountState>, ChainError>;
+}
+
+/// What eSchess needs to know about an account on the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountState {
+    /// The last sequence number the account used. Its next transaction must use this plus one.
+    pub sequence: i64,
+    /// The credit assets it holds a trustline for and is authorized to receive. A payment of any other credit asset to
+    /// it fails on chain (and still costs a fee). Every account can receive XLM.
+    pub can_receive: Vec<AssetId>,
+}
+
+impl AccountState {
+    pub fn can_receive(&self, asset: &AssetId) -> bool {
+        asset.is_native() || self.can_receive.contains(asset)
+    }
 }

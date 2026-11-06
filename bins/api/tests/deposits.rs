@@ -12,7 +12,7 @@ use eschess_api::Config;
 use eschess_domain::money::{Amount, AssetId};
 use eschess_domain::stellar::{AccountKey, MuxedAccount};
 use eschess_ledger::AccountId;
-use eschess_stellar::{Chain, ChainError, IncomingPayment, Memo, Page, Record};
+use eschess_stellar::{AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ fn config() -> Config {
             hot_account: AccountKey::parse(HOT).unwrap(),
             usdc: usdc(),
             poll_ms: 5_000,
+            withdraw: Default::default(),
         }),
         ..Config::default()
     }
@@ -73,6 +74,10 @@ impl Chain for FakeChain {
             records,
             next_cursor,
         })
+    }
+
+    async fn account(&self, _account: &str) -> Result<Option<AccountState>, ChainError> {
+        Ok(None) // deposits never look accounts up
     }
 }
 

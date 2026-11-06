@@ -38,11 +38,21 @@ impl Api {
     }
 
     pub fn with_config(pool: PgPool, config: Config) -> Api {
+        Api::with_chain(pool, config, None)
+    }
+
+    /// With a (fake) Stellar network, for the routes that look things up on it.
+    pub fn with_chain(
+        pool: PgPool,
+        config: Config,
+        chain: Option<Arc<dyn eschess_stellar::Chain>>,
+    ) -> Api {
         let state = AppState {
             pool: pool.clone(),
             config: Arc::new(config),
             mailer: Arc::new(CapturingMailer::default()),
             hub: eschess_api::hub::Hub::new(),
+            chain,
         };
         Api {
             app: app(state.clone()),
@@ -71,7 +81,11 @@ impl Api {
 
     /// Another server process over the same database: all game state lives there, so it can carry on any game.
     pub fn another_server(&self) -> Api {
-        Api::with_config(self.pool.clone(), (*self.state.config).clone())
+        Api::with_chain(
+            self.pool.clone(),
+            (*self.state.config).clone(),
+            self.state.chain.clone(),
+        )
     }
 
     pub async fn call(

@@ -23,6 +23,8 @@ pub struct AppState {
     pub mailer: Arc<dyn Mailer>,
     /// Who is connected over WebSocket and watching which game.
     pub hub: hub::Hub,
+    /// The Stellar network, when the platform has a wallet on it (`config.stellar`). Withdrawals look destinations up here.
+    pub chain: Option<Arc<dyn eschess_stellar::Chain>>,
 }
 
 /// The API's routes. Kept separate from `main` so tests can call it without opening a network port.
@@ -60,6 +62,27 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/wallet/deposit-info", get(routes::wallet::deposit_info))
         .route("/v1/wallet/deposits", get(routes::wallet::deposits))
+        .route(
+            "/v1/wallet/withdrawals",
+            get(routes::withdrawals::list).post(routes::withdrawals::request),
+        )
+        .route("/v1/wallet/withdrawals/{id}", get(routes::withdrawals::get))
+        .route(
+            "/v1/wallet/withdrawals/{id}/cancel",
+            post(routes::withdrawals::cancel),
+        )
+        .route(
+            "/v1/admin/withdrawals",
+            get(routes::withdrawals::admin_list),
+        )
+        .route(
+            "/v1/admin/withdrawals/{id}/approve",
+            post(routes::withdrawals::admin_approve),
+        )
+        .route(
+            "/v1/admin/withdrawals/{id}/reject",
+            post(routes::withdrawals::admin_reject),
+        )
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(
@@ -107,6 +130,7 @@ mod tests {
                 print_tokens: false,
             }),
             hub: hub::Hub::new(),
+            chain: None,
         }
     }
 

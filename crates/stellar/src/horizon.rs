@@ -5,7 +5,7 @@ use std::time::Duration;
 use eschess_domain::money::{Amount, AssetId};
 use serde_json::Value;
 
-use crate::{Chain, ChainError, IncomingPayment, Memo, Page, Record};
+use crate::{AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record};
 
 pub struct HorizonChain {
     client: reqwest::Client,
@@ -69,6 +69,58 @@ impl Chain for HorizonChain {
             .map_err(|e| ChainError::Unexpected(e.to_string()))?;
         parse_page(&body, account)
     }
+
+    async fn account(&self, account: &str) -> Result<Option<AccountState>, ChainError> {
+        let response = self
+            .client
+            .get(format!("{}/accounts/{account}", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ChainError::Unavailable(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(ChainError::Unavailable(format!(
+                "Horizon answered {status}"
+            )));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| ChainError::Unexpected(e.to_string()))?;
+        parse_account(&body).map(Some)
+    }
+}
+
+/// Turns Horizon's answer for one account into an [`AccountState`]. Pure, so it is tested on recorded JSON.
+///
+/// A trustline counts only if the issuer has authorized it (`is_authorized`): a payment to an unauthorized trustline
+/// fails on chain. A trustline we cannot read is left out rather than guessed, so the account looks unable to receive it.
+pub fn parse_account(body: &Value) -> Result<AccountState, ChainError> {
+    let sequence = text(body, "sequence")
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| ChainError::Unexpected("an account without a readable sequence".into()))?;
+    let balances = body
+        .get("balances")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ChainError::Unexpected("an account without balances".into()))?;
+    let can_receive = balances
+        .iter()
+        .filter(|b| {
+            matches!(
+                text(b, "asset_type"),
+                Some("credit_alphanum4" | "credit_alphanum12")
+            )
+        })
+        .filter(|b| b.get("is_authorized").and_then(Value::as_bool) == Some(true))
+        .filter_map(|b| AssetId::credit(text(b, "asset_code")?, text(b, "asset_issuer")?).ok())
+        .collect();
+    Ok(AccountState {
+        sequence,
+        can_receive,
+    })
 }
 
 /// Turns one page of Horizon's `payments` answer into records. Pure, so it is tested on recorded JSON.
@@ -387,5 +439,56 @@ mod tests {
             .await
             .expect("an unfunded account is not an error");
         assert!(nobody.records.is_empty());
+    }
+
+    const USDC_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
+    #[test]
+    fn an_account_is_read_with_only_the_trustlines_that_can_receive() {
+        let body = json!({
+            "id": "GBUUQEXJEVAN2FLTOEBQ2OUJREAQOAEYYNW5R2X7O7RE4LZ2DNMBUEAV",
+            "sequence": "4294967296",
+            "balances": [
+                {"balance": "25.0000000", "asset_type": "credit_alphanum4", "asset_code": "USDC",
+                 "asset_issuer": USDC_ISSUER, "is_authorized": true},
+                {"balance": "0.0000000", "asset_type": "credit_alphanum12", "asset_code": "FROZENTOKEN",
+                 "asset_issuer": USDC_ISSUER, "is_authorized": false},
+                {"balance": "0.0000000", "asset_type": "liquidity_pool_shares", "liquidity_pool_id": "abc"},
+                {"balance": "9999.9999900", "asset_type": "native"}
+            ]
+        });
+        let a = parse_account(&body).unwrap();
+        assert_eq!(a.sequence, 4_294_967_296);
+        let usdc = AssetId::credit("USDC", USDC_ISSUER).unwrap();
+        assert_eq!(a.can_receive, vec![usdc.clone()]);
+        assert!(a.can_receive(&usdc));
+        assert!(a.can_receive(&AssetId::native()));
+        assert!(!a.can_receive(&AssetId::credit("FROZENTOKEN", USDC_ISSUER).unwrap()));
+    }
+
+    #[test]
+    fn an_account_answer_of_the_wrong_shape_is_an_error() {
+        assert!(parse_account(&json!({"balances": []})).is_err());
+        assert!(parse_account(&json!({"sequence": "x", "balances": []})).is_err());
+        assert!(parse_account(&json!({"sequence": "1"})).is_err());
+    }
+
+    /// Reads real accounts from the Stellar testnet: `cargo test -p eschess-stellar -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs internet access to horizon-testnet.stellar.org"]
+    async fn live_testnet_accounts_are_read_and_a_missing_one_is_none() {
+        let chain = HorizonChain::new("https://horizon-testnet.stellar.org").unwrap();
+        let issuer = chain
+            .account(USDC_ISSUER)
+            .await
+            .unwrap()
+            .expect("Circle's issuer exists");
+        assert!(issuer.sequence > 0);
+        // A valid address nobody has funded (a throwaway test key).
+        let unfunded = "GCLSLSBBGOP2GTENWWKA2DXRTNWMRBE6KGVV4UNZK7LMIGMCOQ6EJT2J";
+        if let Some(a) = chain.account(unfunded).await.unwrap() {
+            // Someone may have funded the public test key; then it must still read cleanly.
+            assert!(a.sequence > 0);
+        }
     }
 }

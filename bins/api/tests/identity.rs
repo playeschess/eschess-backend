@@ -37,6 +37,7 @@ impl Api {
                 config: Arc::new(config),
                 mailer: mailer.clone(),
                 hub: eschess_api::hub::Hub::new(),
+                chain: None,
             }),
             pool,
             mailer,

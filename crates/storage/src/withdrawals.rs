@@ -747,6 +747,22 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Withdrawal> {
     Ok(row(&r))
 }
 
+/// The player's withdrawal made under this `client_request_id`, if there is one.
+pub async fn of_request(
+    pool: &PgPool,
+    user: Uuid,
+    client_request_id: Uuid,
+) -> Result<Option<Withdrawal>> {
+    let r = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM withdrawals WHERE user_id = $1 AND client_request_id = $2"
+    ))
+    .bind(user)
+    .bind(client_request_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r.as_ref().map(row))
+}
+
 /// A player's withdrawals, newest first.
 pub async fn of_user(pool: &PgPool, user: Uuid, limit: i64) -> Result<Vec<Withdrawal>> {
     let rows = sqlx::query(&format!(
