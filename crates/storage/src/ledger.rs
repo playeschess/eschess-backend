@@ -5,7 +5,7 @@ use std::fmt;
 
 use eschess_domain::money::AssetId;
 use eschess_ledger::{AccountId, Posting, Side};
-use sqlx::{PgExecutor, PgPool, Row};
+use sqlx::{PgConnection, PgExecutor, PgPool, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -102,6 +102,15 @@ pub async fn create_account<'e>(
 /// it is sent and even if copies arrive at once. The same key with different content is an error.
 pub async fn post(pool: &PgPool, posting: &Posting) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
+    let outcome = post_in(&mut tx, posting).await?;
+    tx.commit().await?; // the deferred balance check runs here
+    Ok(outcome)
+}
+
+/// [`post`], inside a transaction the caller owns, so a posting can commit together with the change that causes it
+/// (a withdrawal's status, say) or not at all. The deferred balance check runs when the caller commits; map an error
+/// from that commit with `LedgerStoreError::from`.
+pub async fn post_in(tx: &mut PgConnection, posting: &Posting) -> Result<PostOutcome> {
     // Copies of one request queue up here, so the second sees the first one's result.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("ledger:{}", posting.key().as_str()))
@@ -171,7 +180,6 @@ pub async fn post(pool: &PgPool, posting: &Posting) -> Result<PostOutcome> {
             .execute(&mut *tx)
             .await?;
     }
-    tx.commit().await?; // the deferred balance check runs here
     Ok(PostOutcome::Posted(transaction_id))
 }
 
