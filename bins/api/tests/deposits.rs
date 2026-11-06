@@ -12,7 +12,9 @@ use eschess_api::Config;
 use eschess_domain::money::{Amount, AssetId};
 use eschess_domain::stellar::{AccountKey, MuxedAccount};
 use eschess_ledger::AccountId;
-use eschess_stellar::{AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record};
+use eschess_stellar::{
+    AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record, Submitted, TxOutcome,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -78,6 +80,17 @@ impl Chain for FakeChain {
 
     async fn account(&self, _account: &str) -> Result<Option<AccountState>, ChainError> {
         Ok(None) // deposits never look accounts up
+    }
+    async fn submit(&self, _: &str) -> Result<Submitted, ChainError> {
+        unreachable!("the API never submits")
+    }
+
+    async fn transaction(&self, _: &str) -> Result<Option<TxOutcome>, ChainError> {
+        unreachable!("the API never looks transactions up")
+    }
+
+    async fn latest_ledger_close_time(&self) -> Result<i64, ChainError> {
+        unreachable!("the API never reads ledgers")
     }
 }
 

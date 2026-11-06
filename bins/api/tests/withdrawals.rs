@@ -14,7 +14,7 @@ use eschess_api::Config;
 use eschess_domain::money::{Amount, AssetId};
 use eschess_domain::stellar::AccountKey;
 use eschess_ledger::{Entry, IdempotencyKey, Posting, Side};
-use eschess_stellar::{AccountState, Chain, ChainError, Page};
+use eschess_stellar::{AccountState, Chain, ChainError, Page, Submitted, TxOutcome};
 use eschess_storage::stellar::{system_account, user_wallet, CUSTODY_KIND};
 use eschess_storage::withdrawals::{grant_role, APPROVER_ROLE};
 use serde_json::{json, Value};
@@ -56,6 +56,17 @@ impl Chain for FakeChain {
             return Err(ChainError::Unavailable("the network is down".into()));
         }
         Ok(self.accounts.lock().unwrap().get(account).cloned())
+    }
+    async fn submit(&self, _: &str) -> Result<Submitted, ChainError> {
+        unreachable!("the API never submits")
+    }
+
+    async fn transaction(&self, _: &str) -> Result<Option<TxOutcome>, ChainError> {
+        unreachable!("the API never looks transactions up")
+    }
+
+    async fn latest_ledger_close_time(&self) -> Result<i64, ChainError> {
+        unreachable!("the API never reads ledgers")
     }
 }
 

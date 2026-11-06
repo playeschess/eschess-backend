@@ -5,7 +5,9 @@ use std::time::Duration;
 use eschess_domain::money::{Amount, AssetId};
 use serde_json::Value;
 
-use crate::{AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record};
+use crate::{
+    AccountState, Chain, ChainError, IncomingPayment, Memo, Page, Record, Submitted, TxOutcome,
+};
 
 pub struct HorizonChain {
     client: reqwest::Client,
@@ -92,6 +94,211 @@ impl Chain for HorizonChain {
             .map_err(|e| ChainError::Unexpected(e.to_string()))?;
         parse_account(&body).map(Some)
     }
+
+    async fn submit(&self, envelope_xdr: &str) -> Result<Submitted, ChainError> {
+        let response = self
+            .client
+            .post(format!("{}/transactions", self.base_url))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!("tx={}", form_encode(envelope_xdr)))
+            .send()
+            .await
+            .map_err(|e| ChainError::Unavailable(e.to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(Submitted::Accepted);
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|e| ChainError::Unexpected(e.to_string()))?;
+            return Ok(Submitted::Refused(refusal_codes(&body)));
+        }
+        // 504 (timed out waiting for a ledger) and the rest: unknown.
+        Err(ChainError::Unavailable(format!(
+            "Horizon answered {status}"
+        )))
+    }
+
+    async fn transaction(&self, hash: &str) -> Result<Option<TxOutcome>, ChainError> {
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ChainError::Unexpected(format!(
+                "{hash:?} is not a transaction hash"
+            )));
+        }
+        let response = self
+            .client
+            .get(format!("{}/transactions/{hash}", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ChainError::Unavailable(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(ChainError::Unavailable(format!(
+                "Horizon answered {status}"
+            )));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| ChainError::Unexpected(e.to_string()))?;
+        parse_transaction(&body).map(Some)
+    }
+
+    async fn latest_ledger_close_time(&self) -> Result<i64, ChainError> {
+        let response = self
+            .client
+            .get(format!("{}/ledgers", self.base_url))
+            .query(&[("order", "desc"), ("limit", "1")])
+            .send()
+            .await
+            .map_err(|e| ChainError::Unavailable(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ChainError::Unavailable(format!(
+                "Horizon answered {}",
+                response.status()
+            )));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| ChainError::Unexpected(e.to_string()))?;
+        parse_latest_ledger(&body)
+    }
+}
+
+/// Percent-encodes base64 text for a form body (`+`, `/` and `=` are not safe there).
+fn form_encode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '+' => "%2B".to_string(),
+            '/' => "%2F".to_string(),
+            '=' => "%3D".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// The result codes from a refused submission, e.g. `tx_failed: op_no_trust`.
+fn refusal_codes(body: &Value) -> String {
+    let codes = body.pointer("/extras/result_codes");
+    let tx = codes
+        .and_then(|c| text(c, "transaction"))
+        .unwrap_or("unknown");
+    let ops: Vec<&str> = codes
+        .and_then(|c| c.get("operations"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if ops.is_empty() {
+        tx.to_string()
+    } else {
+        format!("{tx}: {}", ops.join(", "))
+    }
+}
+
+/// Reads Horizon's answer for one transaction. Pure, so it is tested on recorded JSON.
+pub fn parse_transaction(body: &Value) -> Result<TxOutcome, ChainError> {
+    let successful = body
+        .get("successful")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ChainError::Unexpected("a transaction without `successful`".into()))?;
+    let fee_charged = match body.get("fee_charged") {
+        Some(Value::String(s)) => s.parse().ok(),
+        Some(Value::Number(n)) => n.as_i64(),
+        _ => None,
+    }
+    .ok_or_else(|| ChainError::Unexpected("a transaction without a readable fee_charged".into()))?;
+    let result_code = text(body, "result_xdr")
+        .map(result_code)
+        .unwrap_or_else(|| "unknown".into());
+    Ok(TxOutcome {
+        successful,
+        fee_charged,
+        result_code,
+    })
+}
+
+/// Turns a base64 `TransactionResult` into a readable code: `tx_success`, or `tx_failed: payment_no_trust`.
+pub fn result_code(result_xdr: &str) -> String {
+    use stellar_xdr::{
+        Limits, OperationResult, OperationResultTr, ReadXdr, TransactionResult,
+        TransactionResultResult,
+    };
+    let Ok(r) = TransactionResult::from_xdr_base64(result_xdr, Limits::none()) else {
+        return "unreadable".into();
+    };
+    let snake = |name: &str| {
+        let mut out = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        }
+        out
+    };
+    let tx = snake(r.result.name());
+    match &r.result {
+        TransactionResultResult::TxFailed(ops) => {
+            let first_failure = ops.iter().find_map(|op| match op {
+                OperationResult::OpInner(OperationResultTr::Payment(p)) => {
+                    (p.name() != "Success").then(|| format!("payment_{}", snake(p.name())))
+                }
+                OperationResult::OpInner(_) => None,
+                other => Some(snake(other.name())),
+            });
+            match first_failure {
+                Some(op) => format!("{tx}: {op}"),
+                None => tx,
+            }
+        }
+        _ => tx,
+    }
+}
+
+/// The close time of the newest ledger in a `/ledgers?order=desc&limit=1` answer.
+pub fn parse_latest_ledger(body: &Value) -> Result<i64, ChainError> {
+    let closed_at = body
+        .pointer("/_embedded/records/0/closed_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ChainError::Unexpected("no latest ledger".into()))?;
+    unix_seconds(closed_at)
+        .ok_or_else(|| ChainError::Unexpected(format!("unreadable closed_at {closed_at:?}")))
+}
+
+/// Reads `YYYY-MM-DDTHH:MM:SSZ` (UTC, as Horizon writes it) as unix seconds.
+pub fn unix_seconds(t: &str) -> Option<i64> {
+    let b = t.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from 1970-01-01 to the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3_600 + mm * 60 + ss)
 }
 
 /// Turns Horizon's answer for one account into an [`AccountState`]. Pure, so it is tested on recorded JSON.
@@ -490,5 +697,118 @@ mod tests {
             // Someone may have funded the public test key; then it must still read cleanly.
             assert!(a.sequence > 0);
         }
+    }
+
+    fn encoded_result(result: stellar_xdr::TransactionResultResult) -> String {
+        use stellar_xdr::{Limits, TransactionResult, TransactionResultExt, WriteXdr};
+        TransactionResult {
+            fee_charged: 100,
+            result,
+            ext: TransactionResultExt::V0,
+        }
+        .to_xdr_base64(Limits::none())
+        .unwrap()
+    }
+
+    #[test]
+    fn result_codes_are_readable() {
+        use stellar_xdr::{
+            OperationResult, OperationResultTr, PaymentResult, TransactionResultResult as R,
+        };
+        let pay = |p| OperationResult::OpInner(OperationResultTr::Payment(p));
+        let ok = encoded_result(R::TxSuccess(
+            vec![pay(PaymentResult::Success)].try_into().unwrap(),
+        ));
+        assert_eq!(result_code(&ok), "tx_success");
+        let no_trust = encoded_result(R::TxFailed(
+            vec![pay(PaymentResult::NoTrust)].try_into().unwrap(),
+        ));
+        assert_eq!(result_code(&no_trust), "tx_failed: payment_no_trust");
+        let no_account = encoded_result(R::TxFailed(
+            vec![OperationResult::OpNoAccount].try_into().unwrap(),
+        ));
+        assert_eq!(result_code(&no_account), "tx_failed: op_no_account");
+        assert_eq!(result_code(&encoded_result(R::TxTooLate)), "tx_too_late");
+        assert_eq!(result_code("not xdr"), "unreadable");
+    }
+
+    #[test]
+    fn a_transaction_is_read_whether_it_paid_or_not() {
+        use stellar_xdr::{
+            OperationResult, OperationResultTr, PaymentResult, TransactionResultResult as R,
+        };
+        let failed = encoded_result(R::TxFailed(
+            vec![OperationResult::OpInner(OperationResultTr::Payment(
+                PaymentResult::Underfunded,
+            ))]
+            .try_into()
+            .unwrap(),
+        ));
+        let t = parse_transaction(&json!({
+            "hash": "ab".repeat(32), "successful": false, "fee_charged": "100", "result_xdr": failed
+        }))
+        .unwrap();
+        assert_eq!(
+            t,
+            TxOutcome {
+                successful: false,
+                fee_charged: 100,
+                result_code: "tx_failed: payment_underfunded".into()
+            }
+        );
+        let t = parse_transaction(&json!({ "successful": true, "fee_charged": 250 })).unwrap();
+        assert!(t.successful && t.fee_charged == 250);
+        assert!(parse_transaction(&json!({ "fee_charged": "100" })).is_err());
+        assert!(parse_transaction(&json!({ "successful": true })).is_err());
+    }
+
+    #[test]
+    fn refusals_name_the_transaction_and_operation_codes() {
+        let body = json!({ "extras": { "result_codes": { "transaction": "tx_failed", "operations": ["op_no_trust"] } } });
+        assert_eq!(refusal_codes(&body), "tx_failed: op_no_trust");
+        assert_eq!(
+            refusal_codes(
+                &json!({ "extras": { "result_codes": { "transaction": "tx_bad_seq" } } })
+            ),
+            "tx_bad_seq"
+        );
+        assert_eq!(refusal_codes(&json!({})), "unknown");
+        assert_eq!(form_encode("a+b/c=="), "a%2Bb%2Fc%3D%3D");
+    }
+
+    #[test]
+    fn ledger_close_times_are_read_as_unix_seconds() {
+        assert_eq!(unix_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix_seconds("2023-11-14T22:13:20Z"), Some(1_700_000_000));
+        assert_eq!(unix_seconds("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+        assert_eq!(unix_seconds("2026-11-06T15:28:20Z"), Some(1_793_978_900));
+        for bad in [
+            "2026-11-06 15:28:20Z",
+            "2026-13-01T00:00:00Z",
+            "2026-11-06T15:28:20+01:00",
+            "",
+        ] {
+            assert_eq!(unix_seconds(bad), None, "{bad}");
+        }
+        let body = json!({ "_embedded": { "records": [ { "sequence": 5, "closed_at": "2023-11-14T22:13:20Z" } ] } });
+        assert_eq!(parse_latest_ledger(&body).unwrap(), 1_700_000_000);
+        assert!(parse_latest_ledger(&json!({ "_embedded": { "records": [] } })).is_err());
+    }
+
+    /// `cargo test -p eschess-stellar -- --ignored`
+    #[tokio::test]
+    #[ignore = "needs internet access to horizon-testnet.stellar.org"]
+    async fn live_testnet_ledger_time_is_recent_and_an_unknown_hash_is_none() {
+        let chain = HorizonChain::new("https://horizon-testnet.stellar.org").unwrap();
+        let closed = chain.latest_ledger_close_time().await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            (now - closed).abs() < 300,
+            "latest ledger closed at {closed}, now is {now}"
+        );
+        assert_eq!(chain.transaction(&"00".repeat(32)).await.unwrap(), None);
     }
 }
