@@ -38,12 +38,15 @@ What exists today that we build on:
 | The withdrawal definitively fails, or is cancelled / rejected before sending | debit `platform_withdrawals_pending`, credit `user_wallet` | The hold is returned to the player. |
 
 Each posting uses an idempotency key derived from the withdrawal id and the step (`wd:<id>:hold`, `wd:<id>:settle`,
-`wd:<id>:refund`), so a step repeated after a crash posts once. `settle` and `refund` are mutually exclusive, which a
-database CHECK on the withdrawal's status enforces (below).
+`wd:<id>:refund`), so a step repeated after a crash posts once. `settle` and `refund` are mutually exclusive: the
+withdrawal's states only move forward (a trigger), and a unique index on the ledger allows one hold and one outcome
+(settle or refund) per withdrawal, whatever idempotency key a posting uses.
 
-The network fee is paid in XLM by the hot wallet, not charged to the player, for now. It is recorded as a fourth
-posting on confirmation (debit `platform_network_fees`, credit `custody_stellar`, in XLM) so the XLM mirror stays true.
-Who pays fees in production is an open product decision (PRD OD-16).
+The network fee is paid in XLM by the hot wallet, not charged to the player, for now. The fee each attempt was charged
+is recorded on the attempt (`fee_charged_stroops`) but **not yet posted to the ledger**: the hot wallet's XLM was funded
+outside the ledger, so the XLM `custody_stellar` account does not hold it and a fee posting would overdraw it. Fees
+move into the ledger (debit `platform_network_fees`, credit `custody_stellar`) once funding the hot wallet is itself a
+recorded posting. Who pays fees in production is an open product decision (PRD OD-16).
 
 ### 2. One intent, many attempts
 
@@ -55,15 +58,17 @@ withdrawal_attempts    -- each signed transaction we built for it: hash, source 
 `withdrawals.status`:
 
 ```
-requested ──► awaiting_approval ──► approved ──► submitting ──► confirmed
-    │                │                  │             │
-    │                ▼                  ▼             ▼
-    └──────────► cancelled          rejected       failed  (refunded)
+awaiting_approval ──► approved | rejected* | cancelled*
+approved          ──► submitting | cancelled*
+submitting        ──► confirmed | failed*
+                                             * refunded in the same transaction
+confirmed, failed, rejected, cancelled are final.
 ```
 
-- `requested` → `approved` directly when the amount is at or below the auto-approve threshold; otherwise
-  `awaiting_approval`.
-- The player may cancel while `requested`, `awaiting_approval` or `approved` (nothing has been signed yet).
+- A request starts as `approved` when the amount is at or below the auto-approve threshold, otherwise as
+  `awaiting_approval`. The hold is posted in the same transaction as the insert.
+- An approver may reject only while `awaiting_approval`.
+- The player may cancel while `awaiting_approval` or `approved` (nothing has been signed yet).
 - `submitting` means *at least one attempt exists*. From here the player can no longer cancel, because a signed
   transaction may be in flight.
 - `failed` is reached only when **every** attempt is proved not to have landed (below) and we decide to stop. The refund
