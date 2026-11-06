@@ -8,10 +8,12 @@ crates/domain   pure rules: money, chess, game clock (rating to come); no I/O
 crates/notification  sending email (log, in-memory for tests, or any SMTP provider)
 crates/auth     password hashing, tokens, input validation (no database)
 crates/ledger   double-entry postings and idempotency keys (pure, no database)
+crates/stellar  the Stellar network: reading deposits, building and signing payments (no database)
 crates/storage  PostgreSQL access: migrations, ledger, identity
 bins/api        REST API
 bins/migrate    applies database migrations
 migrations/     forward-only SQL migrations
+docs/adr/       architecture decision records (ADR 0001: withdrawals)
 ```
 
 More crates and binaries (ledger, storage, game, realtime, worker ...) are added step by step, following the

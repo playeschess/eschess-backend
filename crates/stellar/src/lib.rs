@@ -1,9 +1,11 @@
-//! Reading the Stellar network.
+//! The Stellar network: reading payments that arrive, and building and signing payments that leave ([`tx`],
+//! [`signer`]).
 //!
-//! eSchess keeps all customer funds in one platform wallet (the "hot wallet"). This crate answers one question: *which
+//! eSchess keeps all customer funds in one platform wallet (the "hot wallet"). For deposits this crate answers *which
 //! payments have arrived at that wallet since I last looked?* It knows nothing about players or the database; it
 //! turns the network's JSON into plain [`IncomingPayment`]s and says clearly when a record is something it cannot
-//! understand, so the caller can set it aside for a human instead of losing it.
+//! understand, so the caller can set it aside for a human instead of losing it. For withdrawals it builds a payment
+//! transaction, gives its hash before anything is sent, and has a [`signer::Signer`] sign it.
 //!
 //! Where the data comes from is behind the [`Chain`] trait. [`horizon::HorizonChain`] reads a Horizon server (the
 //! testnet one for now); tests use a fake. Horizon is documented as eventually giving way to other APIs, and the trait
@@ -11,6 +13,8 @@
 
 pub mod deposit;
 pub mod horizon;
+pub mod signer;
+pub mod tx;
 
 use std::fmt;
 
