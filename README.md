@@ -65,6 +65,13 @@ GET    /v1/matchmaking           still waiting, or the game that was found
 DELETE /v1/matchmaking           leave the queue (not possible once a game was found)
 GET    /v1/wallet/deposit-info   how to deposit USDC: an M... address, or the wallet address plus a memo (needs a confirmed email)
 GET    /v1/wallet/deposits       your deposits, newest first
+POST   /v1/wallet/withdrawals    send USDC out: {client_request_id, amount, destination, memo?}; the money is held at once
+GET    /v1/wallet/withdrawals    your withdrawals, newest first
+GET    /v1/wallet/withdrawals/{id}         one of them, with its transaction attempts
+POST   /v1/wallet/withdrawals/{id}/cancel  withdraw the request, only before anything is signed (the money comes back)
+GET    /v1/admin/withdrawals     approvers only: the approval queue (?status= for other states)
+POST   /v1/admin/withdrawals/{id}/approve  approvers only, never their own
+POST   /v1/admin/withdrawals/{id}/reject   approvers only: {reason}, shown to the player; the money comes back
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -223,6 +230,23 @@ network is refused on purpose until it is a deliberate step.
   after a crash between any two steps, never pays twice.
 - **Never a guess.** A payment with no deposit id, an unknown or conflicting one, an asset we do not accept, or a record we
   could not read is kept as `needs_review` with the reason, not credited and not dropped.
-- **Not built yet:** withdrawals (sending USDC out) and the naira on/off ramp. Muxed destinations are read from Horizon's
+- **Not built yet:** sending withdrawals (below) and the naira on/off ramp. Muxed destinations are read from Horizon's
   `to_muxed_id` field when present, and the memo path is the dependable one until a real muxed payment has been checked
   against the live testnet.
+
+## Withdrawals (crates/storage, bins/api) — requests only, nothing is sent yet
+
+The design is [ADR 0001](docs/adr/0001-stellar-withdrawals.md). A player asks for USDC to be sent to a Stellar address
+(`POST /v1/wallet/withdrawals`). Sending is the next step (a worker); until then a withdrawal waits as `approved`.
+
+- **Held at once.** The amount leaves the player's wallet for `platform_withdrawals_pending` in the same transaction that
+  records the request, so it cannot be staked or withdrawn twice. A cancel, a rejection or a failed payment brings it
+  back; a payment that lands moves it to `custody_stellar`. The database allows one hold and one outcome per withdrawal.
+- **Checked before anything is held:** a confirmed email; at least `WITHDRAW_MIN_USDC`; a valid `G...` or `M...` address
+  that is not the platform wallet (or an `M...` over it) nor USDC's issuer; a memo that fits; at most
+  `WITHDRAW_DAILY_LIMIT_USDC` in 24 hours (checked inside the transaction, so requests at once cannot pass it together);
+  and, on the network, that the account exists and can receive USDC (otherwise the payment would fail and cost a fee).
+- **Approval.** Up to `WITHDRAW_AUTO_APPROVE_USDC` goes ahead at once. Above it, a person with the `withdrawal_approver`
+  role approves or rejects (`/v1/admin/withdrawals`); nobody decides on their own withdrawal. Roles are granted by SQL:
+  `INSERT INTO user_roles (user_id, role) VALUES ('<id>', 'withdrawal_approver');`
+- **Retries are safe.** The app picks a `client_request_id`; the same request again answers with the first withdrawal.

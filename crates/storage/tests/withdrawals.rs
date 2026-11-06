@@ -11,7 +11,7 @@ use eschess_storage::ledger::{balance, post, reconcile};
 use eschess_storage::stellar::{system_account, user_wallet, CUSTODY_KIND};
 use eschess_storage::withdrawals::{
     self, approve, attempt_expired, attempt_failed, attempt_landed, cancel, give_up, grant_role,
-    record_attempt, reject, request, AttemptStatus, NewAttempt, NewWithdrawal, Status,
+    record_attempt, reject, request, AttemptStatus, NewAttempt, NewWithdrawal, Policy, Status,
     WithdrawalError, APPROVER_ROLE, PENDING_KIND,
 };
 use proptest::prelude::*;
@@ -23,8 +23,12 @@ use uuid::Uuid;
 const ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const DEST: &str = "GBUUQEXJEVAN2FLTOEBQ2OUJREAQOAEYYNW5R2X7O7RE4LZ2DNMBUEAV";
 const HOT: &str = "GCLSLSBBGOP2GTENWWKA2DXRTNWMRBE6KGVV4UNZK7LMIGMCOQ6EJT2J";
-/// Above this, a person must approve.
+/// Above 1,000 a person must approve; a high daily limit, so only the daily-limit test meets it.
 const AUTO: i64 = 1_000;
+const POLICY: Policy = Policy {
+    auto_approve_up_to_minor: AUTO,
+    daily_limit_minor: 1_000_000,
+};
 
 fn usdc() -> AssetId {
     AssetId::credit("USDC", ISSUER).unwrap()
@@ -123,14 +127,14 @@ fn attempt(n: i64) -> NewAttempt {
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn a_request_holds_the_money_at_once(pool: PgPool) {
     let u = funded(&pool, 5_000).await;
-    let (w, created) = request(&pool, &new(u, 700), AUTO).await.unwrap();
+    let (w, created) = request(&pool, &new(u, 700), POLICY).await.unwrap();
     assert!(created);
     assert_eq!(w.status, Status::Approved, "at or below the threshold");
     assert_eq!(w.memo, PaymentMemo::Id(42));
     assert_eq!(wallet_of(&pool, u).await, 4_300);
     assert_eq!(pending(&pool).await, 700);
 
-    let (big, _) = request(&pool, &new(u, AUTO + 1), AUTO).await.unwrap();
+    let (big, _) = request(&pool, &new(u, AUTO + 1), POLICY).await.unwrap();
     assert_eq!(big.status, Status::AwaitingApproval, "above the threshold");
     assert_eq!(wallet_of(&pool, u).await, 4_300 - AUTO - 1);
 }
@@ -139,7 +143,7 @@ async fn a_request_holds_the_money_at_once(pool: PgPool) {
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn more_than_the_balance_is_refused_and_leaves_nothing_behind(pool: PgPool) {
     let u = funded(&pool, 500).await;
-    let err = request(&pool, &new(u, 501), AUTO).await.unwrap_err();
+    let err = request(&pool, &new(u, 501), POLICY).await.unwrap_err();
     assert!(matches!(err, WithdrawalError::InsufficientFunds), "{err:?}");
     assert!(withdrawals::of_user(&pool, u, 10).await.unwrap().is_empty());
     assert_eq!(wallet_of(&pool, u).await, 500);
@@ -150,8 +154,8 @@ async fn more_than_the_balance_is_refused_and_leaves_nothing_behind(pool: PgPool
 async fn a_retried_request_is_the_same_withdrawal_and_holds_once(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
     let req = new(u, 300);
-    let (first, _) = request(&pool, &req, AUTO).await.unwrap();
-    let (again, created) = request(&pool, &req, AUTO).await.unwrap();
+    let (first, _) = request(&pool, &req, POLICY).await.unwrap();
+    let (again, created) = request(&pool, &req, POLICY).await.unwrap();
     assert!(!created);
     assert_eq!(again.id, first.id);
     assert_eq!(wallet_of(&pool, u).await, 700);
@@ -159,7 +163,7 @@ async fn a_retried_request_is_the_same_withdrawal_and_holds_once(pool: PgPool) {
     let mut changed = req.clone();
     changed.amount = amount(301);
     assert!(matches!(
-        request(&pool, &changed, AUTO).await.unwrap_err(),
+        request(&pool, &changed, POLICY).await.unwrap_err(),
         WithdrawalError::RequestIdReused
     ));
 }
@@ -170,7 +174,7 @@ async fn racing_requests_cannot_both_spend_the_same_money(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
     let tries = (0..8).map(|_| {
         let pool = pool.clone();
-        async move { request(&pool, &new(u, 600), AUTO).await }
+        async move { request(&pool, &new(u, 600), POLICY).await }
     });
     let results = futures::future::join_all(tries).await;
     let ok = results.iter().filter(|r| r.is_ok()).count();
@@ -190,7 +194,7 @@ async fn racing_requests_cannot_both_spend_the_same_money(pool: PgPool) {
 async fn a_player_can_cancel_only_their_own_and_only_before_signing(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
     let stranger = user(&pool).await;
-    let (w, _) = request(&pool, &new(u, 400), AUTO).await.unwrap();
+    let (w, _) = request(&pool, &new(u, 400), POLICY).await.unwrap();
     assert!(matches!(
         cancel(&pool, w.id, stranger).await.unwrap_err(),
         WithdrawalError::NotFound
@@ -205,7 +209,7 @@ async fn a_player_can_cancel_only_their_own_and_only_before_signing(pool: PgPool
         WithdrawalError::WrongState(Status::Cancelled)
     ));
 
-    let (sent, _) = request(&pool, &new(u, 400), AUTO).await.unwrap();
+    let (sent, _) = request(&pool, &new(u, 400), POLICY).await.unwrap();
     record_attempt(&pool, sent.id, &attempt(1)).await.unwrap();
     assert!(matches!(
         cancel(&pool, sent.id, u).await.unwrap_err(),
@@ -222,7 +226,7 @@ async fn only_an_approver_who_is_not_the_player_decides(pool: PgPool) {
     grant_role(&pool, u, APPROVER_ROLE).await.unwrap(); // even an approver may not approve their own
     let nobody = user(&pool).await;
 
-    let (w, _) = request(&pool, &new(u, 5_000), AUTO).await.unwrap();
+    let (w, _) = request(&pool, &new(u, 5_000), POLICY).await.unwrap();
     assert!(matches!(
         approve(&pool, w.id, nobody).await.unwrap_err(),
         WithdrawalError::NotApprover
@@ -241,7 +245,7 @@ async fn only_an_approver_who_is_not_the_player_decides(pool: PgPool) {
         (Status::Approved, Some(approver))
     );
 
-    let (w2, _) = request(&pool, &new(u, 4_000), AUTO).await.unwrap();
+    let (w2, _) = request(&pool, &new(u, 4_000), POLICY).await.unwrap();
     let no = reject(&pool, w2.id, approver, "destination flagged")
         .await
         .unwrap();
@@ -255,7 +259,7 @@ async fn only_an_approver_who_is_not_the_player_decides(pool: PgPool) {
 async fn a_new_attempt_waits_until_the_last_one_provably_cannot_land(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
     let custody_before = custody(&pool).await;
-    let (w, _) = request(&pool, &new(u, 600), AUTO).await.unwrap();
+    let (w, _) = request(&pool, &new(u, 600), POLICY).await.unwrap();
 
     let first = record_attempt(&pool, w.id, &attempt(1)).await.unwrap();
     assert_eq!(first.attempt_no, 1);
@@ -310,7 +314,7 @@ async fn a_new_attempt_waits_until_the_last_one_provably_cannot_land(pool: PgPoo
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn a_failed_payment_is_refunded_when_we_give_up(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
-    let (w, _) = request(&pool, &new(u, 600), AUTO).await.unwrap();
+    let (w, _) = request(&pool, &new(u, 600), POLICY).await.unwrap();
     let a = record_attempt(&pool, w.id, &attempt(1)).await.unwrap();
     let failed = attempt_failed(&pool, a.id, "op_no_trust", 100)
         .await
@@ -339,8 +343,12 @@ async fn a_failed_payment_is_refunded_when_we_give_up(pool: PgPool) {
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn the_daily_total_counts_only_money_that_may_leave(pool: PgPool) {
     let u = funded(&pool, 10_000).await;
-    request(&pool, &new(u, 300), AUTO).await.unwrap();
-    let (c, _) = request(&pool, &new(u, 500), AUTO).await.unwrap();
+    let policy = Policy {
+        daily_limit_minor: 1_000,
+        ..POLICY
+    };
+    request(&pool, &new(u, 300), policy).await.unwrap();
+    let (c, _) = request(&pool, &new(u, 500), policy).await.unwrap();
     cancel(&pool, c.id, u).await.unwrap();
     assert_eq!(
         withdrawals::withdrawn_recently(&pool, u, &usdc(), 24)
@@ -348,13 +356,50 @@ async fn the_daily_total_counts_only_money_that_may_leave(pool: PgPool) {
             .unwrap(),
         300
     );
+    // 700 is left today: the cancelled 500 does not count.
+    let over = request(&pool, &new(u, 701), policy).await.unwrap_err();
+    assert!(
+        matches!(
+            over,
+            WithdrawalError::DailyLimit {
+                remaining_minor: 700
+            }
+        ),
+        "{over:?}"
+    );
+    let req = new(u, 700);
+    request(&pool, &req, policy).await.unwrap();
+    // The limit is now reached, but retrying a request that was already accepted still answers with it.
+    let (again, created) = request(&pool, &req, policy).await.unwrap();
+    assert!(!created);
+    assert_eq!(again.amount, amount(700));
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn requests_at_the_same_moment_cannot_together_pass_the_daily_limit(pool: PgPool) {
+    let u = funded(&pool, 100_000).await;
+    let policy = Policy {
+        daily_limit_minor: 1_000,
+        ..POLICY
+    };
+    let tries = (0..6).map(|_| {
+        let pool = pool.clone();
+        async move { request(&pool, &new(u, 400), policy).await }
+    });
+    let ok = futures::future::join_all(tries)
+        .await
+        .iter()
+        .filter(|r| r.is_ok())
+        .count();
+    assert_eq!(ok, 2, "2 x 400 fit under 1,000; a third does not");
 }
 
 // The database on its own, going around the storage API.
 
 async fn confirmed(pool: &PgPool) -> (Uuid, Uuid) {
     let u = funded(pool, 1_000).await;
-    let (w, _) = request(pool, &new(u, 600), AUTO).await.unwrap();
+    let (w, _) = request(pool, &new(u, 600), POLICY).await.unwrap();
     let a = record_attempt(pool, w.id, &attempt(1)).await.unwrap();
     attempt_landed(pool, a.id, 100).await.unwrap();
     (u, w.id)
@@ -410,7 +455,7 @@ async fn the_database_refuses_going_backwards_or_changing_what_was_asked(pool: P
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn the_database_refuses_a_second_open_attempt_and_self_approval(pool: PgPool) {
     let u = funded(&pool, 1_000).await;
-    let (w, _) = request(&pool, &new(u, 600), AUTO).await.unwrap();
+    let (w, _) = request(&pool, &new(u, 600), POLICY).await.unwrap();
     record_attempt(&pool, w.id, &attempt(1)).await.unwrap();
     let raw = sqlx::query(
         "INSERT INTO withdrawal_attempts (id, withdrawal_id, attempt_no, tx_hash, source_account, sequence, fee_stroops, max_time, envelope_xdr) \
@@ -424,7 +469,11 @@ async fn the_database_refuses_a_second_open_attempt_and_self_approval(pool: PgPo
     .await;
     assert!(raw.is_err(), "two unresolved attempts for one withdrawal");
 
-    let (w2, _) = request(&pool, &new(u, 300), 0).await.unwrap();
+    let manual = Policy {
+        auto_approve_up_to_minor: 0,
+        ..POLICY
+    };
+    let (w2, _) = request(&pool, &new(u, 300), manual).await.unwrap();
     let own = sqlx::query(
         "UPDATE withdrawals SET status = 'approved', decided_by = user_id WHERE id = $1",
     )
@@ -500,7 +549,7 @@ async fn whatever_happens_money_is_conserved_and_nothing_is_paid_twice(pool: PgP
             // Every operation either succeeds or is refused; neither may break the invariants below.
             match op.clone() {
                 Op::Request { player, minor } => {
-                    if let Ok((w, _)) = request(&pool, &new(players[player], minor), AUTO).await {
+                    if let Ok((w, _)) = request(&pool, &new(players[player], minor), POLICY).await {
                         made.push(w.id);
                     }
                 }

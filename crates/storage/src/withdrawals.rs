@@ -164,6 +164,10 @@ pub enum WithdrawalError {
     AttemptStillOpen,
     /// The attempt is already resolved differently.
     AttemptResolved(AttemptStatus),
+    /// More than the player may still withdraw in the last 24 hours.
+    DailyLimit {
+        remaining_minor: i64,
+    },
     /// Giving up is only possible when no attempt landed and none can still land.
     CannotGiveUp,
     Ledger(LedgerStoreError),
@@ -193,6 +197,10 @@ impl fmt::Display for WithdrawalError {
             WithdrawalError::CannotGiveUp => {
                 write!(f, "cannot give up: an attempt landed or might still land")
             }
+            WithdrawalError::DailyLimit { remaining_minor } => write!(
+                f,
+                "over the daily limit: {remaining_minor} (minor units) may still be withdrawn today"
+            ),
             WithdrawalError::Ledger(e) => write!(f, "ledger error: {e}"),
             WithdrawalError::Database(e) => write!(f, "database error: {e}"),
         }
@@ -422,27 +430,66 @@ async fn commit(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
     tx.commit().await.map_err(WithdrawalError::from)
 }
 
-/// Records a player's request and holds the money, in one transaction. At or below `auto_approve_up_to_minor` it is
-/// approved at once; above it, it waits for an approver.
+/// The limits a request is checked against, in the asset's minor units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// At or below this, a withdrawal is approved at once; above it, a person must approve it.
+    pub auto_approve_up_to_minor: i64,
+    /// The most a player may withdraw in any 24 hours (counting withdrawals that are not cancelled, rejected or failed).
+    pub daily_limit_minor: i64,
+}
+
+/// Records a player's request and holds the money, in one transaction.
 ///
-/// A retry with the same `client_request_id` and the same details returns the first withdrawal (`false`: not new);
-/// with different details it is refused.
+/// A retry with the same `client_request_id` and the same details returns the first withdrawal (`false`: not new),
+/// even if the limits have been reached since; with different details it is refused. Requests from one player are
+/// handled one at a time, so two at once cannot both slip under the daily limit.
 pub async fn request(
     pool: &PgPool,
     new: &NewWithdrawal,
-    auto_approve_up_to_minor: i64,
+    policy: Policy,
 ) -> Result<(Withdrawal, bool)> {
     ensure_accounts(pool, new.user_id, new.amount.asset()).await?;
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("withdrawals:{}", new.user_id))
+        .execute(&mut *tx)
+        .await?;
+
+    let existing = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM withdrawals WHERE user_id = $1 AND client_request_id = $2"
+    ))
+    .bind(new.user_id)
+    .bind(new.client_request_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(r) = existing {
+        let w = row(&r);
+        let same = w.amount == new.amount && w.destination == new.destination && w.memo == new.memo;
+        return if same {
+            Ok((w, false))
+        } else {
+            Err(WithdrawalError::RequestIdReused)
+        };
+    }
+
+    let recent = withdrawn_recently(&mut *tx, new.user_id, new.amount.asset(), 24).await?;
+    let remaining = (policy.daily_limit_minor - recent).max(0);
+    if new.amount.minor() > remaining {
+        return Err(WithdrawalError::DailyLimit {
+            remaining_minor: remaining,
+        });
+    }
+
     let (memo_type, memo) = memo_to_db(&new.memo);
-    let status = if new.amount.minor() <= auto_approve_up_to_minor {
+    let status = if new.amount.minor() <= policy.auto_approve_up_to_minor {
         Status::Approved
     } else {
         Status::AwaitingApproval
     };
-    let inserted = sqlx::query(&format!(
+    let r = sqlx::query(&format!(
         "INSERT INTO withdrawals (id, user_id, client_request_id, asset, amount_minor, destination, memo_type, memo, status) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (user_id, client_request_id) DO NOTHING RETURNING {COLUMNS}"
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {COLUMNS}"
     ))
     .bind(Uuid::now_v7())
     .bind(new.user_id)
@@ -453,31 +500,16 @@ pub async fn request(
     .bind(memo_type)
     .bind(&memo)
     .bind(status.as_str())
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-
-    let Some(r) = inserted else {
-        // A retry (or a concurrent copy, which waited on the unique index until the first committed).
-        let existing = sqlx::query(&format!(
-            "SELECT {COLUMNS} FROM withdrawals WHERE user_id = $1 AND client_request_id = $2"
-        ))
-        .bind(new.user_id)
-        .bind(new.client_request_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let w = row(&existing);
-        let same = w.amount == new.amount && w.destination == new.destination && w.memo == new.memo;
-        return if same {
-            Ok((w, false))
-        } else {
-            Err(WithdrawalError::RequestIdReused)
-        };
-    };
     let w = row(&r);
     post_step(&mut tx, &w, Step::Hold).await?;
     commit(tx).await?;
     Ok((w, true))
 }
+
+const RECENT_TOTAL: &str = "SELECT COALESCE(sum(amount_minor), 0)::bigint FROM withdrawals WHERE user_id = $1 AND asset = $2 \
+     AND requested_at > now() - make_interval(hours => $3) AND status NOT IN ('cancelled', 'rejected', 'failed')";
 
 /// The player withdraws their request. Only before anything is signed (awaiting approval, or approved and not yet
 /// sent); the money goes back to their wallet.
@@ -715,6 +747,22 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Withdrawal> {
     Ok(row(&r))
 }
 
+/// The player's withdrawal made under this `client_request_id`, if there is one.
+pub async fn of_request(
+    pool: &PgPool,
+    user: Uuid,
+    client_request_id: Uuid,
+) -> Result<Option<Withdrawal>> {
+    let r = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM withdrawals WHERE user_id = $1 AND client_request_id = $2"
+    ))
+    .bind(user)
+    .bind(client_request_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r.as_ref().map(row))
+}
+
 /// A player's withdrawals, newest first.
 pub async fn of_user(pool: &PgPool, user: Uuid, limit: i64) -> Result<Vec<Withdrawal>> {
     let rows = sqlx::query(&format!(
@@ -741,21 +789,18 @@ pub async fn with_status(pool: &PgPool, status: Status, limit: i64) -> Result<Ve
 
 /// How much of `asset` the player has asked to withdraw in the last `hours` hours, not counting withdrawals that were
 /// cancelled, rejected or failed (that money never left). For the daily limit.
-pub async fn withdrawn_recently(
-    pool: &PgPool,
+pub async fn withdrawn_recently<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     user: Uuid,
     asset: &AssetId,
     hours: i32,
 ) -> Result<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT COALESCE(sum(amount_minor), 0)::bigint FROM withdrawals WHERE user_id = $1 AND asset = $2 \
-         AND requested_at > now() - make_interval(hours => $3) AND status NOT IN ('cancelled', 'rejected', 'failed')",
-    )
-    .bind(user)
-    .bind(asset.to_string())
-    .bind(hours)
-    .fetch_one(pool)
-    .await?)
+    Ok(sqlx::query_scalar(RECENT_TOTAL)
+        .bind(user)
+        .bind(asset.to_string())
+        .bind(hours)
+        .fetch_one(db)
+        .await?)
 }
 
 pub async fn get_attempt(pool: &PgPool, attempt: Uuid) -> Result<Attempt> {

@@ -43,11 +43,19 @@ async fn main() {
         .await
         .expect("cannot bind");
     tracing::info!("eschess-api listening on {bind}");
+    // The Stellar network, if the platform has a wallet on it: watched for deposits, and asked about withdrawal destinations.
+    let chain: Option<Arc<dyn eschess_stellar::Chain>> = config.stellar.as_ref().map(|st| {
+        Arc::new(
+            eschess_stellar::horizon::HorizonChain::new(&st.horizon_url)
+                .expect("cannot build the Stellar client"),
+        ) as Arc<dyn eschess_stellar::Chain>
+    });
     let state = AppState {
         pool,
         config: Arc::new(config),
         mailer,
         hub: eschess_api::hub::Hub::new(),
+        chain,
     };
     // Listen for game changes made by any server, and push them to the players connected to this one.
     eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());
@@ -57,14 +65,8 @@ async fn main() {
         std::time::Duration::from_secs(1),
     );
     // Credit players for Stellar deposits, if the platform has a wallet configured.
-    if let Some(stellar) = state.config.stellar.clone() {
-        let chain = eschess_stellar::horizon::HorizonChain::new(&stellar.horizon_url)
-            .expect("cannot build the Stellar client");
-        eschess_api::stellar_watcher::spawn_watcher(
-            state.pool.clone(),
-            std::sync::Arc::new(chain),
-            stellar,
-        );
+    if let (Some(stellar), Some(chain)) = (state.config.stellar.clone(), state.chain.clone()) {
+        eschess_api::stellar_watcher::spawn_watcher(state.pool.clone(), chain, stellar);
     }
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown())

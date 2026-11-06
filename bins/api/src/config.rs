@@ -1,4 +1,4 @@
-use eschess_domain::money::AssetId;
+use eschess_domain::money::{Amount, AssetId};
 use eschess_domain::stellar::AccountKey;
 use eschess_storage::identity::Lifetimes;
 
@@ -46,6 +46,79 @@ pub struct StellarConfig {
     pub usdc: AssetId,
     /// How often the wallet is checked for new payments.
     pub poll_ms: u64,
+    /// Limits on withdrawals of `usdc`.
+    pub withdraw: WithdrawLimits,
+}
+
+/// Limits on withdrawals, in minor units of the withdrawn asset (seven decimals: 1 USDC is 10,000,000).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WithdrawLimits {
+    /// The smallest withdrawal accepted. Below it the network fee and the work are not worth it.
+    pub min_minor: i64,
+    /// At or below this a withdrawal is sent without a person approving it.
+    pub auto_approve_minor: i64,
+    /// The most one player may withdraw in any 24 hours.
+    pub daily_limit_minor: i64,
+}
+
+impl Default for WithdrawLimits {
+    /// 1 USDC minimum, up to 100 USDC sent without approval, 1,000 USDC a day. Starting values for the testnet; the real
+    /// figures are a product decision.
+    fn default() -> Self {
+        WithdrawLimits {
+            min_minor: 10_000_000,
+            auto_approve_minor: 1_000_000_000,
+            daily_limit_minor: 10_000_000_000,
+        }
+    }
+}
+
+/// Reads a USDC amount such as `100` or `0.5`; absent or empty gives the default. Anything else stops the server starting.
+fn usdc_amount(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    usdc: &AssetId,
+    default: i64,
+) -> Result<i64, String> {
+    match get(name) {
+        None => Ok(default),
+        Some(v) if v.trim().is_empty() => Ok(default),
+        Some(v) => Amount::from_decimal_str(v.trim(), usdc.clone())
+            .map(|a| a.minor())
+            .map_err(|e| format!("{name}: {v:?} is not an amount ({e})")),
+    }
+}
+
+fn withdraw_limits_from(
+    get: &dyn Fn(&str) -> Option<String>,
+    usdc: &AssetId,
+) -> Result<WithdrawLimits, String> {
+    let d = WithdrawLimits::default();
+    let limits = WithdrawLimits {
+        min_minor: usdc_amount(get, "WITHDRAW_MIN_USDC", usdc, d.min_minor)?,
+        auto_approve_minor: usdc_amount(
+            get,
+            "WITHDRAW_AUTO_APPROVE_USDC",
+            usdc,
+            d.auto_approve_minor,
+        )?,
+        daily_limit_minor: usdc_amount(
+            get,
+            "WITHDRAW_DAILY_LIMIT_USDC",
+            usdc,
+            d.daily_limit_minor,
+        )?,
+    };
+    if limits.min_minor == 0 {
+        return Err("WITHDRAW_MIN_USDC must be more than zero".into());
+    }
+    if limits.daily_limit_minor < limits.min_minor {
+        return Err(
+            "WITHDRAW_DAILY_LIMIT_USDC is below WITHDRAW_MIN_USDC: nobody could ever withdraw"
+                .into(),
+        );
+    }
+    Ok(limits)
 }
 
 /// Circle's USDC issuer on the Stellar testnet (https://developers.circle.com/stablecoins/usdc-on-test-networks).
@@ -136,12 +209,14 @@ fn stellar_from(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<StellarCo
     if poll_ms < 500 {
         return Err("STELLAR_POLL_MS must be at least 500".into());
     }
+    let withdraw = withdraw_limits_from(get, &usdc)?;
     Ok(Some(StellarConfig {
         network,
         horizon_url,
         hot_account,
         usdc,
         poll_ms,
+        withdraw,
     }))
 }
 
@@ -349,6 +424,54 @@ mod tests {
         // An explicit list is respected as it is.
         let explicit = load(&[("STELLAR_HOT_ACCOUNT", HOT), ("WALLET_ASSETS", "XLM")]).unwrap();
         assert_eq!(explicit.wallet_assets, vec![AssetId::native()]);
+    }
+
+    #[test]
+    fn withdrawal_limits_are_read_as_usdc_amounts() {
+        let st = load(&[("STELLAR_HOT_ACCOUNT", HOT)])
+            .unwrap()
+            .stellar
+            .unwrap();
+        assert_eq!(st.withdraw, WithdrawLimits::default());
+        let st = load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("WITHDRAW_MIN_USDC", "0.5"),
+            ("WITHDRAW_AUTO_APPROVE_USDC", "20"),
+            ("WITHDRAW_DAILY_LIMIT_USDC", "250.25"),
+        ])
+        .unwrap()
+        .stellar
+        .unwrap();
+        assert_eq!(
+            st.withdraw,
+            WithdrawLimits {
+                min_minor: 5_000_000,
+                auto_approve_minor: 200_000_000,
+                daily_limit_minor: 2_502_500_000,
+            }
+        );
+    }
+
+    #[test]
+    fn withdrawal_limits_that_make_no_sense_stop_the_server() {
+        let with = |k: &str, v: &str| load(&[("STELLAR_HOT_ACCOUNT", HOT), (k, v)]);
+        assert!(with("WITHDRAW_MIN_USDC", "1,000")
+            .unwrap_err()
+            .contains("WITHDRAW_MIN_USDC"));
+        assert!(with("WITHDRAW_MIN_USDC", "-1").is_err());
+        assert!(with("WITHDRAW_MIN_USDC", "0").is_err());
+        assert!(
+            with("WITHDRAW_AUTO_APPROVE_USDC", "0.00000001").is_err(),
+            "more than 7 decimals"
+        );
+        assert!(
+            with("WITHDRAW_DAILY_LIMIT_USDC", "0.5").is_err(),
+            "below the minimum"
+        );
+        assert!(
+            with("WITHDRAW_AUTO_APPROVE_USDC", "0").is_ok(),
+            "0: a person approves every withdrawal"
+        );
     }
 
     #[test]

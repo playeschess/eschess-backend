@@ -181,3 +181,48 @@ impl From<eschess_storage::games::GameError> for ApiError {
         }
     }
 }
+
+impl From<eschess_storage::withdrawals::WithdrawalError> for ApiError {
+    fn from(e: eschess_storage::withdrawals::WithdrawalError) -> Self {
+        use eschess_storage::withdrawals::WithdrawalError::*;
+        match e {
+            NotFound => ApiError::NotFound,
+            // The admin routes check the role first; this only happens if it was revoked in between.
+            NotApprover => ApiError::NotFound,
+            InsufficientFunds => ApiError::Coded(
+                StatusCode::CONFLICT,
+                "insufficient_funds",
+                "your wallet does not hold that much".into(),
+            ),
+            RequestIdReused => ApiError::Coded(
+                StatusCode::CONFLICT,
+                "client_request_id_reused",
+                "that client_request_id was already used for a different withdrawal".into(),
+            ),
+            DailyLimit { remaining_minor } => {
+                let remaining = eschess_domain::money::Amount::new(
+                    remaining_minor.max(0),
+                    eschess_domain::money::AssetId::native(),
+                )
+                .expect("not negative")
+                .to_decimal_string();
+                ApiError::Coded(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "daily_limit_exceeded",
+                    format!("over the daily withdrawal limit: {remaining} more can be withdrawn in the next 24 hours"),
+                )
+            }
+            WrongState(status) => ApiError::Coded(
+                StatusCode::CONFLICT,
+                "withdrawal_wrong_state",
+                format!("the withdrawal is {} and cannot do that", status.as_str()),
+            ),
+            OwnWithdrawal => ApiError::Coded(
+                StatusCode::FORBIDDEN,
+                "own_withdrawal",
+                "nobody approves or rejects their own withdrawal".into(),
+            ),
+            other => ApiError::internal(other),
+        }
+    }
+}
