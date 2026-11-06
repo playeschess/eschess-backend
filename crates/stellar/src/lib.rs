@@ -99,6 +99,38 @@ pub trait Chain: Send + Sync {
 
     /// The account's current state, or `None` if it does not exist on the network (it has never been funded).
     async fn account(&self, account: &str) -> Result<Option<AccountState>, ChainError>;
+
+    /// Submits a signed envelope (base64 XDR). The answer is only a hint: a timeout or an error does **not** mean the
+    /// transaction will not land, and acceptance is confirmed by [`Chain::transaction`]. Submitting the same envelope
+    /// again is always safe (same hash, same sequence number: it is applied at most once).
+    async fn submit(&self, envelope_xdr: &str) -> Result<Submitted, ChainError>;
+
+    /// What happened to a transaction, by hash, or `None` if it is not in any ledger the server has seen.
+    async fn transaction(&self, hash: &str) -> Result<Option<TxOutcome>, ChainError>;
+
+    /// The close time (unix seconds) of the latest ledger the server has seen. Once it is past a transaction's
+    /// `max_time`, a transaction not found by [`Chain::transaction`] can never land.
+    async fn latest_ledger_close_time(&self) -> Result<i64, ChainError>;
+}
+
+/// What the network said when a transaction was submitted. A hint only (see [`Chain::submit`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submitted {
+    /// Accepted (and, with Horizon, usually already in a ledger).
+    Accepted,
+    /// Refused or failed, with the network's result code. It may still have been included as a failed transaction.
+    Refused(String),
+}
+
+/// A transaction that is in a ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxOutcome {
+    /// It paid. `false` means it is in the ledger but did nothing except charge its fee.
+    pub successful: bool,
+    /// What the fee really was, in stroops.
+    pub fee_charged: i64,
+    /// The result, such as `tx_success` or `tx_failed: payment_no_trust`.
+    pub result_code: String,
 }
 
 /// What eSchess needs to know about an account on the network.

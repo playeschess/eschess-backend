@@ -617,6 +617,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "eschess-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eschess-api",
+ "eschess-domain",
+ "eschess-ledger",
+ "eschess-stellar",
+ "eschess-storage",
+ "futures",
+ "sqlx",
+ "stellar-xdr",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "etcetera"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

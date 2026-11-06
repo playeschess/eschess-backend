@@ -11,6 +11,7 @@ crates/ledger   double-entry postings and idempotency keys (pure, no database)
 crates/stellar  the Stellar network: reading deposits, building and signing payments (no database)
 crates/storage  PostgreSQL access: migrations, ledger, identity
 bins/api        REST API
+bins/worker     money jobs: credits Stellar deposits, sends withdrawals (kept apart from the API)
 bins/migrate    applies database migrations
 migrations/     forward-only SQL migrations
 docs/adr/       architecture decision records (ADR 0001: withdrawals)
@@ -25,6 +26,7 @@ build order in the architecture document.
 make dev               # start Postgres in Docker (needs Docker)
 make migrate           # create/update the database tables
 make run               # start the API, then: curl localhost:8080/health
+make worker            # start the worker next to it (deposits and withdrawals; needs STELLAR_HOT_ACCOUNT)
 make try               # start everything and try every endpoint end to end, reporting what passed
 make test              # unit tests, no database needed
 make test-integration  # tests that use the local Postgres
@@ -221,7 +223,7 @@ network is refused on purpose until it is a deliberate step.
   has a deposit id, and `GET /v1/wallet/deposit-info` gives two equivalent ways to pay: an **`M...` muxed address** (the wallet
   with the id built in, SEP-23; nothing to forget) or the plain wallet address with the id as a **memo**. Either way the
   payment names the player. A text memo, the sender's address and the like are never trusted.
-- **Watching the wallet.** A background task reads the wallet's payments from Horizon (behind the `Chain` trait, so the
+- **Watching the wallet.** The worker (`make worker`, not the API) reads the wallet's payments from Horizon (behind the `Chain` trait, so the
   provider can change and tests use a fake), after a saved cursor, and credits players through the ledger: debit the platform's
   `custody_stellar` account (which mirrors what the wallet holds), credit the player's wallet. Only one server polls at a
   time (a database lock). The cursor moves forward only after a whole page is dealt with.
@@ -230,14 +232,14 @@ network is refused on purpose until it is a deliberate step.
   after a crash between any two steps, never pays twice.
 - **Never a guess.** A payment with no deposit id, an unknown or conflicting one, an asset we do not accept, or a record we
   could not read is kept as `needs_review` with the reason, not credited and not dropped.
-- **Not built yet:** sending withdrawals (below) and the naira on/off ramp. Muxed destinations are read from Horizon's
+- **Not built yet:** the naira on/off ramp. Muxed destinations are read from Horizon's
   `to_muxed_id` field when present, and the memo path is the dependable one until a real muxed payment has been checked
   against the live testnet.
 
-## Withdrawals (crates/storage, bins/api) — requests only, nothing is sent yet
+## Withdrawals (crates/storage, crates/stellar, bins/api, bins/worker) — testnet only
 
 The design is [ADR 0001](docs/adr/0001-stellar-withdrawals.md). A player asks for USDC to be sent to a Stellar address
-(`POST /v1/wallet/withdrawals`). Sending is the next step (a worker); until then a withdrawal waits as `approved`.
+(`POST /v1/wallet/withdrawals`); the worker sends it.
 
 - **Held at once.** The amount leaves the player's wallet for `platform_withdrawals_pending` in the same transaction that
   records the request, so it cannot be staked or withdrawn twice. A cancel, a rejection or a failed payment brings it
@@ -250,3 +252,15 @@ The design is [ADR 0001](docs/adr/0001-stellar-withdrawals.md). A player asks fo
   role approves or rejects (`/v1/admin/withdrawals`); nobody decides on their own withdrawal. Roles are granted by SQL:
   `INSERT INTO user_roles (user_id, role) VALUES ('<id>', 'withdrawal_approver');`
 - **Retries are safe.** The app picks a `client_request_id`; the same request again answers with the first withdrawal.
+- **Sending** (`bins/worker`, `make worker`). The worker needs the hot wallet's signing key in a file
+  (`STELLAR_HOT_SECRET_FILE`, readable only by its owner; testnet only, refused for the public network). Without it,
+  withdrawals are accepted and wait, approved. Each round it first settles what is in flight, then sends the next one:
+  - a transaction is built with an expiry (`max_time`), signed, and **recorded before it is submitted**;
+  - its outcome is decided by **looking its hash up**, never by the submission's answer: paid → confirmed and settled;
+    failed on chain → refunded with the reason; not found → the *same* envelope is re-sent (safe: it can apply once);
+  - only when the network has closed a ledger past `max_time` (plus `WITHDRAW_EXPIRY_MARGIN_SECS`) and the hash is still
+    not there is the attempt marked expired, and only then is a new transaction built. A timeout is never a failure;
+  - one payment is in flight at a time (the hot wallet has one sequence number), and a database lock lets several workers
+    run without sending twice.
+- **Not built yet:** network fees in the ledger (recorded per attempt for now; see the ADR), channel accounts for more
+  than one payment at a time, and production key custody (a KMS or HSM behind the same `Signer` trait).

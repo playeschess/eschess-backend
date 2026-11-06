@@ -94,7 +94,10 @@ submitted**. Then it is submitted. The attempt's states are `pending → (succes
 | Hash lookup: not found, `max_time` not yet passed | Still could land | Wait. Re-sending the **same stored envelope** is allowed (same hash, same sequence number: the network applies it at most once). Building a new one is not. |
 
 Timebounds: `max_time = now + 2 minutes`. Short, so an unknown resolves quickly; long enough for normal ledger close
-times (~5 s). The value is config.
+times (~5 s). The value is config. "Past `max_time`" means past it by a margin as well
+(`WITHDRAW_EXPIRY_MARGIN_SECS`, 60 s): the ledger time and the hash lookup may be answered by different Horizon servers
+behind a load balancer, and a server that is behind could miss a transaction that did land. The ledger time is read
+before the hashes are looked up.
 
 ### 4. Approval and the three principals
 

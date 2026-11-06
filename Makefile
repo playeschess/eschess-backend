@@ -3,10 +3,13 @@
 DATABASE_URL ?= postgres://eschess:eschess@127.0.0.1:5440/eschess
 export DATABASE_URL
 
-.PHONY: run try test test-integration fmt lint check dev dev-down migrate psql
+.PHONY: run worker try test test-integration fmt lint check dev dev-down migrate psql
 
 run:   ## start the API on 127.0.0.1:8080
 	cargo run -p eschess-api
+
+worker:  ## start the worker: credits Stellar deposits and sends withdrawals (run it next to `make run`)
+	cargo run -p eschess-worker
 
 try:   ## start the API and try every endpoint end to end (starts Postgres too)
 	./scripts/try-api.sh
