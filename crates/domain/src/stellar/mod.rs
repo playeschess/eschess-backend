@@ -12,6 +12,7 @@ use std::fmt;
 
 const VERSION_ACCOUNT: u8 = 6 << 3; // 'G'
 const VERSION_MUXED: u8 = 12 << 3; // 'M'
+const VERSION_SEED: u8 = 18 << 3; // 'S'
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressError {
@@ -151,6 +152,31 @@ impl Address {
             Address::Muxed(m) => Some(m.id),
         }
     }
+}
+
+/// Reads an `S...` secret seed (the 32 bytes an ed25519 signing key is made from), verifying the checksum.
+///
+/// The caller should turn the bytes into a signing key at once and not keep them. Errors never contain any of the input.
+pub fn decode_secret_seed(s: &str) -> Result<[u8; 32], AddressError> {
+    let mut bytes = base32_decode(s).ok_or(AddressError::Malformed)?;
+    let result = (|| {
+        if bytes.len() != 35 {
+            return Err(AddressError::Malformed);
+        }
+        let (body, check) = bytes.split_at(33);
+        if crc16_xmodem(body) != u16::from_le_bytes([check[0], check[1]]) {
+            return Err(AddressError::BadChecksum);
+        }
+        if body[0] != VERSION_SEED {
+            return Err(AddressError::UnsupportedKind);
+        }
+        if encode(body[0], &body[1..]) != s {
+            return Err(AddressError::Malformed);
+        }
+        Ok(body[1..33].try_into().unwrap())
+    })();
+    bytes.fill(0);
+    result
 }
 
 fn is_known_length(len: usize) -> bool {
@@ -314,5 +340,31 @@ mod tests {
             assert_eq!(m.len(), 69);
             assert_eq!(MuxedAccount::parse(&m).unwrap(), key.muxed(id), "{id}");
         }
+    }
+
+    // A throwaway test seed (see crates/stellar/tests/data/generate_payment_vectors.py); it holds nothing anywhere.
+    const SEED: &str = "SA3PXIPSNIG2RVLSIREL6KV6PQJTFI7PA4ZBYVP772LORMETDV5FQTNT";
+
+    #[test]
+    fn a_secret_seed_is_read_and_its_kind_and_checksum_are_checked() {
+        let bytes = decode_secret_seed(SEED).unwrap();
+        assert_eq!(encode(VERSION_SEED, &bytes), SEED);
+        let mut typo = SEED.to_string();
+        typo.replace_range(10..11, if &SEED[10..11] == "A" { "B" } else { "A" });
+        assert_eq!(decode_secret_seed(&typo), Err(AddressError::BadChecksum));
+        assert_eq!(decode_secret_seed(G), Err(AddressError::UnsupportedKind));
+        assert_eq!(
+            decode_secret_seed("not a seed"),
+            Err(AddressError::Malformed)
+        );
+        assert_eq!(
+            decode_secret_seed(&SEED[..55]),
+            Err(AddressError::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_secret_seed_is_never_accepted_as_an_address() {
+        assert!(Address::parse(SEED).is_err());
     }
 }
