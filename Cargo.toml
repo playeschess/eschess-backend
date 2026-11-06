@@ -27,6 +27,9 @@ async-trait = "0.1"
 rand = "0.8"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+stellar-xdr = { version = "=30.0.0", default-features = false, features = ["std", "base64"] }
+ed25519-dalek = { version = "=3.0.0", features = ["zeroize"] }
+zeroize = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "uuid"] }
 
 # Password hashing is deliberately slow; keep it usable in debug builds and tests.
