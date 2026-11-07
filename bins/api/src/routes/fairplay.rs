@@ -12,7 +12,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use eschess_fairplay::{GameRecord, Transport};
-use eschess_storage::fairplay::{self, CaseSummary, DecideError, Decision, StoredScore};
+use eschess_storage::fairplay::{self, CaseSummary, DecideError, Decision, Sanction, StoredScore};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -128,6 +128,16 @@ pub struct DecideBody {
     /// The ids of the games the reviewer looked at (`game_records[].game_id` from the case). If the case has gained a
     /// game since, the decision is refused so the reviewer can look again.
     games: Vec<Uuid>,
+    /// Required to confirm, refused on clear: `{"kind": "warning"}` or `{"kind": "suspension", "days": 14}`.
+    #[serde(default)]
+    sanction: Option<SanctionBody>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum SanctionBody {
+    Warning,
+    Suspension { days: u32 },
 }
 
 async fn decide(
@@ -145,6 +155,10 @@ async fn decide(
         decision,
         &body.reason,
         &body.games,
+        body.sanction.as_ref().map(|s| match s {
+            SanctionBody::Warning => Sanction::Warning,
+            SanctionBody::Suspension { days } => Sanction::Suspension { days: *days },
+        }),
     )
     .await
     .map_err(|e| match e {
@@ -154,6 +168,7 @@ async fn decide(
             "case_already_decided",
             format!("this case was already {s}; a decision is final"),
         ),
+        DecideError::BadSanction(why) => ApiError::Validation(format!("sanction: {why}")),
         DecideError::InvalidReason => ApiError::Validation(
             "reason: 1 to 2000 characters, saying what was looked at and why".into(),
         ),
@@ -179,7 +194,7 @@ pub async fn clear(
     decide(&state, &user, id, Decision::Clear, &b).await
 }
 
-/// Unfair play was found. Recorded; no automatic consequence in this baseline.
+/// Unfair play was found. The body names the sanction, which is recorded with the decision.
 pub async fn confirm(
     State(state): State<AppState>,
     user: AuthUser,

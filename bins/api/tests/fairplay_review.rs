@@ -92,6 +92,11 @@ fn decision(reason: &str, games: &[Uuid]) -> Value {
     json!({ "reason": reason, "games": games })
 }
 
+/// A confirmation: the decision plus the sanction it carries.
+fn confirmation(reason: &str, games: &[Uuid], sanction: Value) -> Value {
+    json!({ "reason": reason, "games": games, "sanction": sanction })
+}
+
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn only_reviewers_know_the_routes_exist(pool: PgPool) {
@@ -236,7 +241,11 @@ async fn a_reviewer_sees_the_games_and_the_evidence_then_decides_once(pool: PgPo
             .post(
                 &format!("/v1/admin/fairplay/cases/{case}/{route}"),
                 &rev,
-                decision("again", &[game]),
+                if route == "confirm" {
+                    confirmation("again", &[game], json!({ "kind": "warning" }))
+                } else {
+                    decision("again", &[game])
+                },
             )
             .await;
         assert_eq!(
@@ -267,11 +276,84 @@ async fn a_reviewer_sees_the_games_and_the_evidence_then_decides_once(pool: PgPo
         .post(
             &format!("/v1/admin/fairplay/cases/{case2}/confirm"),
             &rev,
-            decision("same pattern again across both games", &[game2]),
+            confirmation(
+                "same pattern again across both games",
+                &[game2],
+                json!({ "kind": "suspension", "days": 14 }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{confirmed}");
     assert_eq!(confirmed["status"], "confirmed");
+    // The sanction was written with the decision.
+    let (kind, days_left): (String, f64) = sqlx::query_as(
+        "SELECT kind, (EXTRACT(EPOCH FROM (ends_at - imposed_at)) / 86400)::float8 FROM fairplay_sanctions WHERE case_id = $1",
+    )
+    .bind(case2)
+    .fetch_one(&api.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (kind.as_str(), days_left.round() as i64),
+        ("suspension", 14)
+    );
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn confirming_needs_a_sensible_sanction_and_clearing_has_none(pool: PgPool) {
+    let api = Api::new(pool);
+    let (ada, ada_id) = person(&api, "ada").await;
+    let (grace, _) = person(&api, "grace").await;
+    let (rev, rev_id) = person(&api, "rev").await;
+    make_reviewer(&api, rev_id).await;
+    let game = finished_game(&api, &ada, &grace).await;
+    let case = flag(&api, game, ada_id, 95).await;
+    let confirm = format!("/v1/admin/fairplay/cases/{case}/confirm");
+    let clear = format!("/v1/admin/fairplay/cases/{case}/clear");
+
+    for body in [
+        decision("no sanction", &[game]),
+        confirmation(
+            "zero days",
+            &[game],
+            json!({ "kind": "suspension", "days": 0 }),
+        ),
+        confirmation(
+            "too long",
+            &[game],
+            json!({ "kind": "suspension", "days": 366 }),
+        ),
+    ] {
+        let (status, b) = api.post(&confirm, &rev, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{b}");
+    }
+    // Closure is not available yet; the body is not understood at all.
+    let (status, b) = api
+        .post(
+            &confirm,
+            &rev,
+            confirmation("closure", &[game], json!({ "kind": "closure" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    let (status, b) = api
+        .post(
+            &clear,
+            &rev,
+            confirmation("sanction on a clear", &[game], json!({ "kind": "warning" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{b}");
+
+    // None of the refusals decided anything or wrote a sanction.
+    let (open, sanctions): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fairplay_cases WHERE status = 'open'), (SELECT count(*) FROM fairplay_sanctions)",
+    )
+    .fetch_one(&api.pool)
+    .await
+    .unwrap();
+    assert_eq!((open, sanctions), (1, 0));
 }
 
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
@@ -386,7 +468,11 @@ async fn a_game_added_after_the_reviewer_looked_stops_the_decision_until_they_lo
         .post(
             &format!("/v1/admin/fairplay/cases/{case}/confirm"),
             &rev,
-            decision("the same pattern in both games", &ids),
+            confirmation(
+                "the same pattern in both games",
+                &ids,
+                json!({ "kind": "warning" }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{done}");
