@@ -708,7 +708,7 @@ pub async fn suspended_until<'e>(
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT to_char(max(ends_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI \"UTC\"') \
-         FROM fairplay_sanctions WHERE player_id = $1 AND kind = 'suspension' AND ends_at > now()",
+         FROM fairplay_restrictions WHERE player_id = $1 AND kind = 'suspension'",
     )
     .bind(player)
     .fetch_one(db)
@@ -721,8 +721,7 @@ pub async fn is_closed<'e>(
     player: Uuid,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM fairplay_sanctions z JOIN fairplay_closure_reviews r ON r.sanction_id = z.id \
-         WHERE z.player_id = $1 AND z.kind = 'closure' AND r.decision = 'approved')",
+        "SELECT EXISTS (SELECT 1 FROM fairplay_restrictions WHERE player_id = $1 AND kind = 'closure')",
     )
     .bind(player)
     .fetch_one(db)
@@ -863,5 +862,216 @@ async fn end_games_of(pool: &PgPool, player: Uuid) -> Result<(), sqlx::Error> {
             crate::games::resign(pool, id, player).await.map(|_| ())
         };
     }
+    Ok(())
+}
+
+/// A sanction as its player sees it: the kind and dates only, never the case behind it.
+#[derive(Debug, Clone)]
+pub struct MySanction {
+    pub id: Uuid,
+    pub kind: String,
+    pub imposed_at_ms: i64,
+    pub ends_at_ms: Option<i64>,
+    /// Restricting the player right now.
+    pub in_force: bool,
+    /// `pending`, `upheld` or `overturned`; `None` if not appealed.
+    pub appeal: Option<String>,
+    /// A closure still waiting for its second reviewer.
+    pub awaiting_second_reviewer: bool,
+}
+
+pub async fn my_sanctions(pool: &PgPool, player: Uuid) -> Result<Vec<MySanction>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT z.id, z.kind, (extract(epoch FROM z.imposed_at) * 1000)::bigint AS imposed_at_ms, \
+                (extract(epoch FROM z.ends_at) * 1000)::bigint AS ends_at_ms, \
+                EXISTS (SELECT 1 FROM fairplay_restrictions r WHERE r.sanction_id = z.id) AS in_force, \
+                (SELECT CASE WHEN d.decision IS NULL THEN 'pending' ELSE d.decision END FROM fairplay_appeals a \
+                   LEFT JOIN fairplay_appeal_decisions d ON d.appeal_id = a.id WHERE a.sanction_id = z.id) AS appeal, \
+                (z.kind = 'closure' AND NOT EXISTS (SELECT 1 FROM fairplay_closure_reviews cr WHERE cr.sanction_id = z.id)) AS waiting \
+         FROM fairplay_sanctions z WHERE z.player_id = $1 ORDER BY z.imposed_at DESC, z.id",
+    )
+    .bind(player)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| MySanction {
+            id: r.get("id"),
+            kind: r.get("kind"),
+            imposed_at_ms: r.get("imposed_at_ms"),
+            ends_at_ms: r.get("ends_at_ms"),
+            in_force: r.get("in_force"),
+            appeal: r.get("appeal"),
+            awaiting_second_reviewer: r.get("waiting"),
+        })
+        .collect())
+}
+
+#[derive(Debug)]
+pub enum AppealError {
+    /// Not their sanction, a warning, or not restricting them (over, overturned, or a closure not yet approved).
+    NotFound,
+    AlreadyAppealed,
+    InvalidStatement,
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for AppealError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppealError::NotFound => write!(f, "no such sanction to appeal"),
+            AppealError::AlreadyAppealed => write!(
+                f,
+                "this sanction was already appealed; an appeal is made once"
+            ),
+            AppealError::InvalidStatement => {
+                write!(f, "a statement of 1 to 4000 characters is required")
+            }
+            AppealError::Database(e) => write!(f, "database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AppealError {}
+
+impl From<sqlx::Error> for AppealError {
+    fn from(e: sqlx::Error) -> Self {
+        AppealError::Database(e)
+    }
+}
+
+/// The player appeals a sanction that is restricting them, once, in writing.
+pub async fn file_appeal(
+    pool: &PgPool,
+    player: Uuid,
+    sanction: Uuid,
+    statement: &str,
+) -> Result<Uuid, AppealError> {
+    let statement = statement.trim();
+    if statement.is_empty() || statement.chars().count() > 4_000 {
+        return Err(AppealError::InvalidStatement);
+    }
+    let in_force: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fairplay_restrictions WHERE sanction_id = $1 AND player_id = $2)",
+    )
+    .bind(sanction)
+    .bind(player)
+    .fetch_one(pool)
+    .await?;
+    if !in_force {
+        // An appealed-and-upheld sanction is still in force; say "already" for it rather than "no such".
+        let appealed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM fairplay_appeals WHERE sanction_id = $1 AND player_id = $2)",
+        )
+        .bind(sanction)
+        .bind(player)
+        .fetch_one(pool)
+        .await?;
+        return Err(if appealed {
+            AppealError::AlreadyAppealed
+        } else {
+            AppealError::NotFound
+        });
+    }
+    let id = Uuid::now_v7();
+    match sqlx::query("INSERT INTO fairplay_appeals (id, sanction_id, player_id, statement) VALUES ($1, $2, $3, $4)")
+        .bind(id)
+        .bind(sanction)
+        .bind(player)
+        .bind(statement)
+        .execute(pool)
+        .await
+    {
+        Ok(_) => Ok(id),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(AppealError::AlreadyAppealed),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAppeal {
+    pub id: Uuid,
+    pub case_id: Uuid,
+    pub player_id: Uuid,
+    pub username: String,
+    pub kind: String,
+    pub statement: String,
+    pub filed_at_ms: i64,
+}
+
+/// Appeals nobody has decided, oldest first.
+pub async fn pending_appeals(pool: &PgPool) -> Result<Vec<PendingAppeal>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT a.id, z.case_id, a.player_id, u.username, z.kind, a.statement, \
+                (extract(epoch FROM a.filed_at) * 1000)::bigint AS filed_at_ms \
+         FROM fairplay_appeals a JOIN fairplay_sanctions z ON z.id = a.sanction_id JOIN users u ON u.id = a.player_id \
+         WHERE NOT EXISTS (SELECT 1 FROM fairplay_appeal_decisions d WHERE d.appeal_id = a.id) \
+         ORDER BY a.filed_at, a.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| PendingAppeal {
+            id: r.get("id"),
+            case_id: r.get("case_id"),
+            player_id: r.get("player_id"),
+            username: r.get("username"),
+            kind: r.get("kind"),
+            statement: r.get("statement"),
+            filed_at_ms: r.get("filed_at_ms"),
+        })
+        .collect())
+}
+
+/// A reviewer who had no part in the sanction upholds or overturns it. Overturning lifts the restriction at once (the
+/// sanction stays on record). Refused, without saying why, to the player, whoever confirmed the case or reviewed its
+/// closure, and anyone who played in its games.
+pub async fn decide_appeal(
+    pool: &PgPool,
+    appeal: Uuid,
+    reviewer: Uuid,
+    overturn: bool,
+    reason: &str,
+) -> Result<(), ClosureError> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.chars().count() > 2_000 {
+        return Err(ClosureError::InvalidReason);
+    }
+    let mut tx = pool.begin().await?;
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM fairplay_appeals a JOIN fairplay_sanctions z ON z.id = a.sanction_id \
+             JOIN fairplay_cases c ON c.id = z.case_id \
+           WHERE a.id = $1 \
+             AND NOT EXISTS (SELECT 1 FROM fairplay_appeal_decisions d WHERE d.appeal_id = a.id) \
+             AND EXISTS (SELECT 1 FROM user_roles WHERE user_id = $2 AND role = $3) \
+             AND $2 NOT IN (z.player_id, c.decided_by) \
+             AND NOT EXISTS (SELECT 1 FROM fairplay_closure_reviews r WHERE r.sanction_id = z.id AND r.reviewer_id = $2) \
+             AND NOT EXISTS (SELECT 1 FROM fairplay_case_games cg JOIN games g ON g.id = cg.game_id \
+                              WHERE cg.case_id = c.id AND $2 IN (g.white_id, g.black_id)))",
+    )
+    .bind(appeal)
+    .bind(reviewer)
+    .bind(REVIEWER_ROLE)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !allowed {
+        return Err(ClosureError::NotFound);
+    }
+    match sqlx::query("INSERT INTO fairplay_appeal_decisions (appeal_id, reviewer_id, decision, reason) VALUES ($1, $2, $3, $4)")
+        .bind(appeal)
+        .bind(reviewer)
+        .bind(if overturn { "overturned" } else { "upheld" })
+        .bind(reason)
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(_) => {}
+        // Two reviewers at once: the second finds it decided.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Err(ClosureError::NotFound),
+        Err(e) => return Err(e.into()),
+    }
+    tx.commit().await?;
     Ok(())
 }

@@ -61,7 +61,10 @@ impl FromRequestParts<AppState> for AuthUser {
 
 /// What a closed account can still reach.
 fn closed_may_use(path: &str) -> bool {
-    path == "/v1/me" || path.starts_with("/v1/wallet/") || path.starts_with("/v1/auth/")
+    path == "/v1/me"
+        || path.starts_with("/v1/me/")
+        || path.starts_with("/v1/wallet/")
+        || path.starts_with("/v1/auth/")
 }
 
 #[cfg(test)]
@@ -85,7 +88,7 @@ mod tests {
             "/v1/leaderboard",
             "/v1/admin/fairplay/cases",
             "/v1/wallets",
-            "/v1/me/x",
+            "/v1/mex",
         ] {
             assert!(!closed_may_use(no), "{no}");
         }

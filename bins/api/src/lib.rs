@@ -105,6 +105,23 @@ pub fn app(state: AppState) -> Router {
             "/v1/admin/fairplay/cases/{id}/closure/decline",
             post(routes::fairplay::decline_closure),
         )
+        .route("/v1/me/sanctions", get(routes::fairplay::my_sanctions))
+        .route(
+            "/v1/me/sanctions/{id}/appeal",
+            post(routes::fairplay::file_appeal),
+        )
+        .route(
+            "/v1/admin/fairplay/appeals",
+            get(routes::fairplay::pending_appeals),
+        )
+        .route(
+            "/v1/admin/fairplay/appeals/{id}/overturn",
+            post(routes::fairplay::overturn_appeal),
+        )
+        .route(
+            "/v1/admin/fairplay/appeals/{id}/uphold",
+            post(routes::fairplay::uphold_appeal),
+        )
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

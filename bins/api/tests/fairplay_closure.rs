@@ -221,3 +221,200 @@ async fn a_declined_closure_restricts_nothing(pool: PgPool) {
         StatusCode::BAD_REQUEST,
     );
 }
+
+/// Ada's closure, proposed by `r1` and approved by `r2`.
+async fn closed_ada(api: &Api, ada: &str, ada_id: Uuid, grace: &str, r1: &str, r2: &str) -> Uuid {
+    let case = proposed(api, ada, ada_id, grace, r1).await;
+    let (status, b) = api
+        .post(
+            &format!("/v1/admin/fairplay/cases/{case}/closure/approve"),
+            r2,
+            json!({ "reason": "agreed" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    case
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_closed_player_appeals_once_and_a_reviewer_outside_the_case_can_overturn_it(
+    pool: PgPool,
+) {
+    let api = Api::new(pool);
+    let (ada, ada_id) = person(&api, "ada").await;
+    let (grace, _) = person(&api, "grace").await;
+    let (r1, _) = reviewer(&api, "rone").await;
+    let (r2, _) = reviewer(&api, "rtwo").await;
+    let (r3, _) = reviewer(&api, "rthree").await;
+    closed_ada(&api, &ada, ada_id, &grace, &r1, &r2).await;
+
+    // A closed player can see their sanction (without the case behind it) and appeal it.
+    let (status, mine) = api.get("/v1/me/sanctions", &ada).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    let s = &mine["sanctions"][0];
+    assert_eq!(
+        (
+            s["kind"].as_str(),
+            s["in_force"].as_bool(),
+            s["appeal"].is_null()
+        ),
+        (Some("closure"), Some(true), true)
+    );
+    assert!(s.get("case_id").is_none() && s.get("reason").is_none());
+    let id = s["id"].as_str().unwrap().to_string();
+    let appeal_path = format!("/v1/me/sanctions/{id}/appeal");
+
+    assert_eq!(
+        api.post(&appeal_path, &ada, json!({ "statement": "  " }))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        api.post(&appeal_path, &grace, json!({ "statement": "not mine" }))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, b) = api
+        .post(
+            &appeal_path,
+            &ada,
+            json!({ "statement": "I played those games myself." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    let (status, b) = api
+        .post(&appeal_path, &ada, json!({ "statement": "again" }))
+        .await;
+    assert_eq!(
+        (status, code(&b)),
+        (StatusCode::CONFLICT, "already_appealed")
+    );
+
+    // Not decided by the proposer, the closure's reviewer, the player, a player in the case, or a non-reviewer.
+    let (_, list) = api.get("/v1/admin/fairplay/appeals", &r3).await;
+    let appeal = list["appeals"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        list["appeals"][0]["statement"],
+        "I played those games myself."
+    );
+    let overturn = format!("/v1/admin/fairplay/appeals/{appeal}/overturn");
+    let reason = json!({ "reason": "timing fits a slow connection" });
+    for who in [&r1, &r2, &grace] {
+        assert_eq!(
+            api.post(&overturn, who, reason.clone()).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        api.get("/v1/me/sanctions", &ada).await.1["sanctions"][0]["in_force"],
+        true
+    );
+
+    let (status, b) = api.post(&overturn, &r3, reason.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(
+        api.post(&overturn, &r3, reason).await.0,
+        StatusCode::NOT_FOUND,
+        "decided once"
+    );
+
+    // The restriction is gone at once; the sanction stays on record.
+    assert_eq!(
+        api.post("/v1/games", &ada, game_body()).await.0,
+        StatusCode::CREATED
+    );
+    let (_, mine) = api.get("/v1/me/sanctions", &ada).await;
+    assert_eq!(
+        (
+            mine["sanctions"][0]["in_force"].as_bool(),
+            mine["sanctions"][0]["appeal"].as_str()
+        ),
+        (Some(false), Some("overturned"))
+    );
+    assert_eq!(
+        api.count("SELECT count(*) FROM fairplay_sanctions").await,
+        1
+    );
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn an_upheld_appeal_changes_nothing_and_a_warning_cannot_be_appealed(pool: PgPool) {
+    let api = Api::new(pool);
+    let (ada, ada_id) = person(&api, "ada").await;
+    let (grace, _) = person(&api, "grace").await;
+    let (r1, _) = reviewer(&api, "rone").await;
+    let (r2, _) = reviewer(&api, "rtwo").await;
+    let (r3, _) = reviewer(&api, "rthree").await;
+    closed_ada(&api, &ada, ada_id, &grace, &r1, &r2).await;
+    let (_, mine) = api.get("/v1/me/sanctions", &ada).await;
+    let id = mine["sanctions"][0]["id"].as_str().unwrap().to_string();
+    api.post(
+        &format!("/v1/me/sanctions/{id}/appeal"),
+        &ada,
+        json!({ "statement": "please" }),
+    )
+    .await;
+    let (_, list) = api.get("/v1/admin/fairplay/appeals", &r3).await;
+    let appeal = list["appeals"][0]["id"].as_str().unwrap().to_string();
+    let (status, _) = api
+        .post(
+            &format!("/v1/admin/fairplay/appeals/{appeal}/uphold"),
+            &r3,
+            json!({ "reason": "the evidence stands" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        api.post("/v1/games", &ada, game_body()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, mine) = api.get("/v1/me/sanctions", &ada).await;
+    assert_eq!(
+        (
+            mine["sanctions"][0]["in_force"].as_bool(),
+            mine["sanctions"][0]["appeal"].as_str()
+        ),
+        (Some(true), Some("upheld"))
+    );
+    // Once decided, a second appeal is still refused.
+    let (status, b) = api
+        .post(
+            &format!("/v1/me/sanctions/{id}/appeal"),
+            &ada,
+            json!({ "statement": "again" }),
+        )
+        .await;
+    assert_eq!(
+        (status, code(&b)),
+        (StatusCode::CONFLICT, "already_appealed")
+    );
+
+    // A warning restricts nothing and is not appealable.
+    let (bob, bob_id) = person(&api, "bob").await;
+    let game = finished_game(&api, &bob, &grace).await;
+    let case = flag(&api, game, bob_id, 95).await;
+    let (status, b) = api
+        .post(
+            &format!("/v1/admin/fairplay/cases/{case}/confirm"),
+            &r3,
+            json!({ "reason": "minor", "games": [game], "sanction": { "kind": "warning" } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    let (_, mine) = api.get("/v1/me/sanctions", &bob).await;
+    let wid = mine["sanctions"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        api.post(
+            &format!("/v1/me/sanctions/{wid}/appeal"),
+            &bob,
+            json!({ "statement": "x" })
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
