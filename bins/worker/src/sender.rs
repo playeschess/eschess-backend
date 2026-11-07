@@ -223,7 +223,7 @@ async fn fail(pool: &PgPool, id: Uuid, code: &str, report: &mut TickReport) -> R
 }
 
 /// The next withdrawal that needs a transaction: one already being sent whose attempts have all expired (or one whose
-/// failure was recorded but not yet refunded, after a crash), else the oldest approved one.
+/// failure was recorded but not yet refunded, after a crash), else the oldest approved one whose owner has no open fair-play case.
 async fn next_to_send(pool: &PgPool) -> Result<Option<Withdrawal>, String> {
     for w in withdrawals::with_status(pool, Status::Submitting, 20)
         .await
@@ -243,11 +243,10 @@ async fn next_to_send(pool: &PgPool) -> Result<Option<Withdrawal>, String> {
         }
         return Ok(Some(w));
     }
-    Ok(withdrawals::with_status(pool, Status::Approved, 1)
+    // A player with an open fair-play case is skipped, not rejected (ADR 0003 §2).
+    withdrawals::next_approved_not_held(pool)
         .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next())
+        .map_err(|e| e.to_string())
 }
 
 /// Finishes a withdrawal whose attempt failed on chain but which a crash left unrefunded.
