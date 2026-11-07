@@ -111,6 +111,11 @@ case about themselves, or about a game they played in.
 
 The routes answer 404 to everyone else, like the withdrawal admin routes.
 
+A decision names the games the reviewer looked at, and is refused if the case has gained a game since (the worker can
+add one at any moment). Without this, a reviewer could clear evidence they never saw. Both rules (not involved, games
+seen) are checked with the case locked, and the database refuses a decision by anyone who played in one of the case's
+games.
+
 ### 6. What a decision does
 
 In this baseline, **confirming a case records the decision and nothing else.** No automated consequence exists yet. The

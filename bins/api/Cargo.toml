@@ -13,6 +13,7 @@ eschess-storage = { path = "../../crates/storage" }
 eschess-stellar = { path = "../../crates/stellar" }
 eschess-notification = { path = "../../crates/notification" }
 eschess-game = { path = "../../crates/game" }
+eschess-fairplay = { path = "../../crates/fairplay" }
 axum.workspace = true
 tokio = { workspace = true, features = ["time", "sync"] }
 futures.workspace = true
