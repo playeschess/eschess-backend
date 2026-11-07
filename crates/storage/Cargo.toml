@@ -12,6 +12,7 @@ eschess-fairplay = { path = "../fairplay" }
 eschess-game = { path = "../game" }
 eschess-ledger = { path = "../ledger" }
 eschess-stellar = { path = "../stellar" }
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 uuid.workspace = true

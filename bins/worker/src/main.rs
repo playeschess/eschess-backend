@@ -2,9 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eschess_api::Config;
+use eschess_fairplay::{NoopScorer, Scorer as _};
 use eschess_stellar::signer::{LocalSigner, Signer};
 use eschess_stellar::tx::Network;
 use eschess_stellar::Chain;
+use eschess_worker::fairplay::FairplayConfig;
 use eschess_worker::sender::{tick, SenderConfig};
 
 #[tokio::main]
@@ -21,6 +23,10 @@ async fn main() {
     let pool = eschess_storage::connect(&database_url)
         .await
         .expect("cannot connect to the database");
+
+    // Fair play runs whatever else is configured. This repository has only the scorer that scores everything 0; the
+    // private eschess-fairplay repository builds a worker with the real one.
+    spawn_fairplay(pool.clone());
 
     let Some(stellar) = config.stellar.clone() else {
         tracing::info!(
@@ -86,6 +92,38 @@ async fn main() {
         }
     }
     shutdown().await;
+}
+
+fn spawn_fairplay(pool: sqlx::PgPool) {
+    let get = |name: &str| std::env::var(name).ok();
+    let config = FairplayConfig::from_lookup(&get).expect("invalid fair-play settings");
+    let poll = Duration::from_millis(
+        get("FAIRPLAY_POLL_MS")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(10_000u64)
+            .max(1_000),
+    );
+    let scorer = NoopScorer;
+    tracing::info!(
+        "scoring finished games with {} (cases open at {})",
+        scorer.name(),
+        config.case_threshold
+    );
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::fairplay::tick(&pool, &scorer, &config).await {
+                Ok(r) if r.scored + r.unscorable > 0 => tracing::info!(
+                    "fair play: {} scored, {} unscorable, {} case updates",
+                    r.scored,
+                    r.unscorable,
+                    r.cases
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("fair-play round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(poll).await;
+        }
+    });
 }
 
 async fn shutdown() {

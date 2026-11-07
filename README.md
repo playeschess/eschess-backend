@@ -267,6 +267,25 @@ The design is [ADR 0001](docs/adr/0001-stellar-withdrawals.md). A player asks fo
 - **Not built yet:** network fees in the ledger (recorded per attempt for now; see the ADR), channel accounts for more
   than one payment at a time, and production key custody (a KMS or HSM behind the same `Signer` trait).
 
+## Fair play (crates/fairplay, crates/storage, bins/worker)
+
+The design is ADR 0002. The detection rules are secret and live in the private `eschess-fairplay` repository; this
+repository has the plumbing, and a scorer that gives everyone 0.
+
+- **What is recorded.** Every move stores, besides the move and the clock, how it arrived (`ws` or `http`) and the lag the
+  server measured for it (WebSocket only).
+- **Scoring.** The worker gives each finished game to the scorer once per scorer version (`fairplay_runs`), and stores a
+  score from 0 to 100 per player with a summary and evidence for the reviewer (`fairplay_scores`). A new scorer version
+  scores everything again; old scores are kept. Games in progress are never scored.
+- **Never trusted, never stuck.** What the scorer returns is checked first: a score for someone who did not play, two for
+  one player, or a number above 100 refuses the whole result. A game that cannot be scored (inconsistent moves, a scorer
+  that panics, scores that break the rules) is recorded as `unscorable` with the reason, and the worker moves on.
+- **Cases.** A score at or above `FAIRPLAY_CASE_THRESHOLD` opens a review case for the player, or adds the game to their
+  open case (one open case per player). **A score is not a verdict**: only a reviewer decides, and in this baseline a
+  decision is only recorded. The review API is the next step.
+- The database refuses scores for non-players, changed or deleted scores, a second open case, reopening a decided case,
+  adding a game to it, and deciding a case about yourself.
+
 ## Trying it on the testnet
 
 A real deposit and withdrawal, end to end, with disposable testnet wallets. Nothing here touches the public network.
