@@ -83,6 +83,16 @@ pub fn app(state: AppState) -> Router {
             "/v1/admin/withdrawals/{id}/reject",
             post(routes::withdrawals::admin_reject),
         )
+        .route("/v1/admin/fairplay/cases", get(routes::fairplay::list))
+        .route("/v1/admin/fairplay/cases/{id}", get(routes::fairplay::get))
+        .route(
+            "/v1/admin/fairplay/cases/{id}/clear",
+            post(routes::fairplay::clear),
+        )
+        .route(
+            "/v1/admin/fairplay/cases/{id}/confirm",
+            post(routes::fairplay::confirm),
+        )
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

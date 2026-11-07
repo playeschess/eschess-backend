@@ -381,3 +381,268 @@ pub async fn open_case(pool: &PgPool, player: Uuid) -> Result<Option<Case>, sqlx
         games,
     }))
 }
+
+/// The role that may see and decide fair-play cases.
+pub const REVIEWER_ROLE: &str = "fairplay_reviewer";
+
+pub async fn is_reviewer(pool: &PgPool, user: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM user_roles WHERE user_id = $1 AND role = $2)")
+        .bind(user)
+        .bind(REVIEWER_ROLE)
+        .fetch_one(pool)
+        .await
+}
+
+/// A case in the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseSummary {
+    pub id: Uuid,
+    pub player_id: Uuid,
+    pub username: String,
+    pub status: String,
+    pub opened_at_ms: i64,
+    pub games: i64,
+    /// The highest score among the case's games.
+    pub top_score: u8,
+    pub decided_by: Option<Uuid>,
+    pub decided_at_ms: Option<i64>,
+    pub reason: Option<String>,
+}
+
+const CASE_SUMMARY: &str = "SELECT c.id, c.player_id, u.username, c.status, \
+     (extract(epoch FROM c.opened_at) * 1000)::bigint AS opened_at_ms, c.decided_by, \
+     (extract(epoch FROM c.decided_at) * 1000)::bigint AS decided_at_ms, c.reason, \
+     (SELECT count(DISTINCT cg.game_id) FROM fairplay_case_games cg WHERE cg.case_id = c.id) AS games, \
+     (SELECT COALESCE(max(s.score), 0::smallint) FROM fairplay_case_games cg JOIN fairplay_scores s \
+         ON (s.game_id, s.player_id, s.scorer) = (cg.game_id, cg.player_id, cg.scorer) WHERE cg.case_id = c.id) AS top_score \
+     FROM fairplay_cases c JOIN users u ON u.id = c.player_id";
+
+fn case_summary(r: &sqlx::postgres::PgRow) -> CaseSummary {
+    CaseSummary {
+        id: r.get("id"),
+        player_id: r.get("player_id"),
+        username: r.get("username"),
+        status: r.get("status"),
+        opened_at_ms: r.get("opened_at_ms"),
+        games: r.get("games"),
+        top_score: r.get::<i16, _>("top_score") as u8,
+        decided_by: r.get("decided_by"),
+        decided_at_ms: r.get("decided_at_ms"),
+        reason: r.get("reason"),
+    }
+}
+
+/// Cases in one state, oldest first, leaving out any case `viewer` may not review (about them, or about a game they
+/// played in).
+pub async fn cases_for_reviewer(
+    pool: &PgPool,
+    viewer: Uuid,
+    status: &str,
+    limit: i64,
+) -> Result<Vec<CaseSummary>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "{CASE_SUMMARY} WHERE c.status = $1 AND c.player_id <> $2 AND NOT EXISTS ( \
+             SELECT 1 FROM fairplay_case_games cg JOIN games g ON g.id = cg.game_id \
+              WHERE cg.case_id = c.id AND $2 IN (g.white_id, g.black_id)) \
+         ORDER BY c.opened_at, c.id LIMIT $3"
+    ))
+    .bind(status)
+    .bind(viewer)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(case_summary).collect())
+}
+
+/// One game in a case: the whole record, and every score the player got for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseGame {
+    pub record: GameRecord,
+    pub scores: Vec<StoredScore>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseDetail {
+    pub case: CaseSummary,
+    pub games: Vec<CaseGame>,
+}
+
+/// Whether `viewer` played in any game of the case (or is the player it is about).
+async fn involved(pool: &PgPool, case: Uuid, viewer: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fairplay_cases WHERE id = $1 AND player_id = $2) \
+             OR EXISTS (SELECT 1 FROM fairplay_case_games cg JOIN games g ON g.id = cg.game_id \
+                         WHERE cg.case_id = $1 AND $2 IN (g.white_id, g.black_id))",
+    )
+    .bind(case)
+    .bind(viewer)
+    .fetch_one(pool)
+    .await
+}
+
+/// Everything a reviewer needs to decide: the case, each game's moves and clocks, and the scorers' summaries and
+/// evidence. `None` if there is no such case **or `viewer` may not review it**: they are not told which.
+pub async fn case_for_reviewer(
+    pool: &PgPool,
+    case: Uuid,
+    viewer: Uuid,
+) -> Result<Option<CaseDetail>, RecordError> {
+    let Some(r) = sqlx::query(&format!("{CASE_SUMMARY} WHERE c.id = $1"))
+        .bind(case)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if involved(pool, case, viewer).await? {
+        return Ok(None);
+    }
+    let summary = case_summary(&r);
+    let game_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT game_id FROM fairplay_case_games WHERE case_id = $1 GROUP BY game_id ORDER BY min(added_at), game_id",
+    )
+    .bind(case)
+    .fetch_all(pool)
+    .await?;
+    let mut games = Vec::with_capacity(game_ids.len());
+    for id in game_ids {
+        let record = game_record(pool, id).await?.ok_or_else(|| {
+            RecordError::Inconsistent(format!("game {id} is in a case but is not finished"))
+        })?;
+        let scores = scores_of_game(pool, id)
+            .await?
+            .into_iter()
+            .filter(|s| s.player_id == summary.player_id)
+            .collect();
+        games.push(CaseGame { record, scores });
+    }
+    Ok(Some(CaseDetail {
+        case: summary,
+        games,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Nothing wrong was found.
+    Clear,
+    /// Unfair play was found. In this baseline it is recorded and does nothing else (ADR 0002 §6).
+    Confirm,
+}
+
+impl Decision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Decision::Clear => "cleared",
+            Decision::Confirm => "confirmed",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum DecideError {
+    /// No such case, or the person may not review it (no role, or involved): they are not told which.
+    NotFound,
+    /// Already decided; a decision is final.
+    AlreadyDecided(String),
+    /// The reason is empty or longer than 2,000 characters.
+    InvalidReason,
+    /// The case's games are not the ones the reviewer says they looked at (a game was added since): look again.
+    CaseChanged,
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for DecideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecideError::NotFound => write!(f, "no such case"),
+            DecideError::AlreadyDecided(s) => write!(f, "the case is already {s}"),
+            DecideError::InvalidReason => write!(f, "a reason of 1 to 2000 characters is required"),
+            DecideError::CaseChanged => write!(f, "the case has changed since it was looked at"),
+            DecideError::Database(e) => write!(f, "database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DecideError {}
+
+impl From<sqlx::Error> for DecideError {
+    fn from(e: sqlx::Error) -> Self {
+        DecideError::Database(e)
+    }
+}
+
+/// A reviewer clears or confirms an open case, with a written reason. Final: a decided case never changes.
+///
+/// `seen` is the games the reviewer looked at. A worker can add a game to an open case at any moment, so the decision
+/// is refused ([`DecideError::CaseChanged`]) unless `seen` is exactly the case's games: nobody clears evidence they
+/// never saw. The case is locked while this is checked, so no game can be added in between (one that arrives after the
+/// decision opens a new case).
+pub async fn decide(
+    pool: &PgPool,
+    case: Uuid,
+    reviewer: Uuid,
+    decision: Decision,
+    reason: &str,
+    seen: &[Uuid],
+) -> Result<CaseSummary, DecideError> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.chars().count() > 2_000 {
+        return Err(DecideError::InvalidReason);
+    }
+    let mut tx = pool.begin().await?;
+    let Some(status) = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM fairplay_cases WHERE id = $1 FOR UPDATE",
+    )
+    .bind(case)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Err(DecideError::NotFound);
+    };
+    // Checked inside the lock, so a game added just before cannot slip past the "played in it" rule.
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM user_roles WHERE user_id = $2 AND role = $3) \
+         AND NOT EXISTS (SELECT 1 FROM fairplay_cases WHERE id = $1 AND player_id = $2) \
+         AND NOT EXISTS (SELECT 1 FROM fairplay_case_games cg JOIN games g ON g.id = cg.game_id \
+                          WHERE cg.case_id = $1 AND $2 IN (g.white_id, g.black_id))",
+    )
+    .bind(case)
+    .bind(reviewer)
+    .bind(REVIEWER_ROLE)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !allowed {
+        return Err(DecideError::NotFound);
+    }
+    if status != "open" {
+        return Err(DecideError::AlreadyDecided(status));
+    }
+    let mut games: Vec<Uuid> =
+        sqlx::query_scalar("SELECT DISTINCT game_id FROM fairplay_case_games WHERE case_id = $1")
+            .bind(case)
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut seen = seen.to_vec();
+    games.sort();
+    seen.sort();
+    seen.dedup();
+    if games != seen {
+        return Err(DecideError::CaseChanged);
+    }
+    sqlx::query(
+        "UPDATE fairplay_cases SET status = $2, decided_by = $3, decided_at = now(), reason = $4 WHERE id = $1",
+    )
+    .bind(case)
+    .bind(decision.as_str())
+    .bind(reviewer)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let r = sqlx::query(&format!("{CASE_SUMMARY} WHERE c.id = $1"))
+        .bind(case)
+        .fetch_one(pool)
+        .await?;
+    Ok(case_summary(&r))
+}

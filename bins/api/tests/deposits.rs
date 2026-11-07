@@ -432,7 +432,7 @@ async fn the_cursor_survives_failures_and_servers_take_turns(pool: PgPool) {
 
     // While another server is polling, this one stands aside.
     let mut other_server = api.pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext(current_database() || ':' || $1))")
         .bind(format!("stellar-watch:{HOT}"))
         .execute(&mut *other_server)
         .await

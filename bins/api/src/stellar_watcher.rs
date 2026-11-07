@@ -41,11 +41,15 @@ pub async fn poll_once(
 ) -> Result<Stats, String> {
     // Only one server polls at a time. The lock lives as long as this transaction.
     let mut lock = pool.begin().await.map_err(|e| e.to_string())?;
-    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1))")
-        .bind(format!("stellar-watch:{hot_account}"))
-        .fetch_one(&mut *lock)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Advisory locks are shared by every database on the server, so the key names this database: rounds for
+    // different databases (parallel test databases, say) must not make each other skip.
+    let got: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtext(current_database() || ':' || $1))",
+    )
+    .bind(format!("stellar-watch:{hot_account}"))
+    .fetch_one(&mut *lock)
+    .await
+    .map_err(|e| e.to_string())?;
     if !got {
         return Ok(Stats {
             skipped: true,

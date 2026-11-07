@@ -75,6 +75,10 @@ POST   /v1/wallet/withdrawals/{id}/cancel  withdraw the request, only before any
 GET    /v1/admin/withdrawals     approvers only: the approval queue (?status= for other states)
 POST   /v1/admin/withdrawals/{id}/approve  approvers only, never their own
 POST   /v1/admin/withdrawals/{id}/reject   approvers only: {reason}, shown to the player; the money comes back
+GET    /v1/admin/fairplay/cases  reviewers only: the fair-play queue, oldest first (?status=cleared|confirmed for history)
+GET    /v1/admin/fairplay/cases/{id}          reviewers only: the case's games, moves, clocks, lag, scores and evidence
+POST   /v1/admin/fairplay/cases/{id}/clear    reviewers only: {reason, games}, games = the ids you looked at
+POST   /v1/admin/fairplay/cases/{id}/confirm  reviewers only: {reason, games}; recorded, no automatic consequence yet
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -282,7 +286,15 @@ repository has the plumbing, and a scorer that gives everyone 0.
   that panics, scores that break the rules) is recorded as `unscorable` with the reason, and the worker moves on.
 - **Cases.** A score at or above `FAIRPLAY_CASE_THRESHOLD` opens a review case for the player, or adds the game to their
   open case (one open case per player). **A score is not a verdict**: only a reviewer decides, and in this baseline a
-  decision is only recorded. The review API is the next step.
+  decision is only recorded.
+- **Review.** People with the `fairplay_reviewer` role (granted by SQL:
+  `INSERT INTO user_roles (user_id, role) VALUES ('<id>', 'fairplay_reviewer')`) see the queue at
+  `/v1/admin/fairplay/cases`, open a case to see every game's moves, clocks, lag, scores and evidence, and clear or
+  confirm it with a written reason. A decision is final.
+  - Everyone else gets 404, so a player cannot learn they are under review. A reviewer never sees, let alone decides, a
+    case about themselves **or about a game they played in** (the opponent has a stake); the database refuses it too.
+  - The decision lists the games the reviewer looked at. If the worker added a game to the case since, it is refused
+    (`409 case_changed`) until they look again: nobody clears evidence they never saw.
 - The database refuses scores for non-players, changed or deleted scores, a second open case, reopening a decided case,
   adding a game to it, and deciding a case about yourself.
 
