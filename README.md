@@ -78,7 +78,7 @@ POST   /v1/admin/withdrawals/{id}/reject   approvers only: {reason}, shown to th
 GET    /v1/admin/fairplay/cases  reviewers only: the fair-play queue, oldest first (?status=cleared|confirmed for history)
 GET    /v1/admin/fairplay/cases/{id}          reviewers only: the case's games, moves, clocks, lag, scores and evidence
 POST   /v1/admin/fairplay/cases/{id}/clear    reviewers only: {reason, games}, games = the ids you looked at
-POST   /v1/admin/fairplay/cases/{id}/confirm  reviewers only: {reason, games}; recorded, no automatic consequence yet
+POST   /v1/admin/fairplay/cases/{id}/confirm  reviewers only: {reason, games, sanction}; sanction = {kind:"warning"} or {kind:"suspension", days:1-365}
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -290,7 +290,8 @@ repository has the plumbing, and a scorer that gives everyone 0.
 - **Review.** People with the `fairplay_reviewer` role (granted by SQL:
   `INSERT INTO user_roles (user_id, role) VALUES ('<id>', 'fairplay_reviewer')`) see the queue at
   `/v1/admin/fairplay/cases`, open a case to see every game's moves, clocks, lag, scores and evidence, and clear or
-  confirm it with a written reason. A decision is final.
+  confirm it with a written reason; a confirmation names a sanction (a warning, or a suspension of 1 to 365 days),
+  recorded with it. Nothing enforces a suspension yet. A decision is final.
   - Everyone else gets 404, so a player cannot learn they are under review. A reviewer never sees, let alone decides, a
     case about themselves **or about a game they played in** (the opponent has a stake); the database refuses it too.
   - The decision lists the games the reviewer looked at. If the worker added a game to the case since, it is refused
