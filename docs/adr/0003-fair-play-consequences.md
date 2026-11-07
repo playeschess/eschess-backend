@@ -46,12 +46,21 @@ and the offender's rating is reset. Results are not rewritten.
 
 ### 4. Staked games and money
 
-If a confirmed case involves staked games, the opponent's stake is returned in full and the offender's stake is **not**
-paid out. Whether the offender's stake is returned, kept as platform revenue, or shared with opponents is OD-14 and is a
-business and legal decision, not an engineering one. Until it is decided, the offender's stake stays held in a ledger
-account of its own, and nothing is paid out.
+**Decided by the owner (OD-14, 2026-11-07): a confirmed cheater's stake goes to the fair player, automatically.**
 
-All money movements here use the existing double-entry ledger; there is no new way to move money.
+When a reviewer confirms a case, every staked game in it is settled by the ledger in the same step, with no second
+approval. A score alone never moves money; only a person's confirmation does.
+
+- If the cheater won, the opponent receives both stakes: their own back and the cheater's.
+- If the cheater lost or drew, the opponent already holds what the result gave them and nothing further moves.
+- A case covering several staked games settles each one separately, and a game is never settled twice.
+
+All of this is ordinary double-entry ledger postings, with the game and the case recorded as the reason; there is no new
+way to move money. The platform keeps no part of a confiscated stake.
+
+*Known cost:* if an appeal later overturns a confirmation, money the opponent has already withdrawn cannot be taken
+back from them. The platform bears that reversal. This is why confirmation of a staked game needs a reviewer's full
+attention, and why §5 gives every sanction an appeal.
 
 ### 5. Appeals
 
@@ -66,7 +75,6 @@ is deleted.
 
 ## Needs a decision from the owner
 
-- **OD-14**: what happens to a confirmed cheater's stake (§4).
 - Hold maximum age and who the escalation goes to (§2).
 - Whether sanction 3 (closure) may be applied by one reviewer, or needs a second (proposed: a second).
 - Legal review of terms of service wording, the appeal process, and holding a user's funds.
@@ -74,6 +82,6 @@ is deleted.
 ## Build order (after acceptance)
 
 1. Case state to the payout path: "open case" blocks sending withdrawals and creating staked games.
-2. Sanctions and their effects on account status; the offender-stake ledger account.
+2. Sanctions and their effects on account status; settling staked games on confirmation.
 3. Appeals.
 4. Notifications to the player (hold, sanction, outcome).
