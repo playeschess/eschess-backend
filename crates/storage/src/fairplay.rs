@@ -692,3 +692,18 @@ pub async fn decide(
         .await?;
     Ok(case_summary(&r))
 }
+
+/// When the player's rated play is suspended until (ADR 0003 §3), as text for the player, or `None` if it is not. A
+/// warning restricts nothing. Where several suspensions overlap, the latest end counts.
+pub async fn suspended_until<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    player: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT to_char(max(ends_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI \"UTC\"') \
+         FROM fairplay_sanctions WHERE player_id = $1 AND kind = 'suspension' AND ends_at > now()",
+    )
+    .bind(player)
+    .fetch_one(db)
+    .await
+}

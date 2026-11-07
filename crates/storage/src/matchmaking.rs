@@ -49,7 +49,7 @@ async fn pair_waiting(
     db: &mut PgConnection,
     coin: &mut (dyn FnMut() -> bool + Send),
 ) -> Result<usize> {
-    let rows = sqlx::query("SELECT user_id, base_ms, increment_ms, rated, rating, (extract(epoch from clock_timestamp() - joined_at) * 1000)::bigint AS waited_ms FROM match_queue WHERE game_id IS NULL ORDER BY joined_at, user_id")
+    let rows = sqlx::query("SELECT user_id, base_ms, increment_ms, rated, rating, (extract(epoch from clock_timestamp() - joined_at) * 1000)::bigint AS waited_ms FROM match_queue q WHERE game_id IS NULL AND (NOT rated OR NOT EXISTS (SELECT 1 FROM fairplay_sanctions s WHERE s.player_id = q.user_id AND s.kind = 'suspension' AND s.ends_at > now())) ORDER BY joined_at, user_id")
         .fetch_all(&mut *db)
         .await?;
     // Players are grouped by what they asked for; only players in the same group can meet.
@@ -124,6 +124,11 @@ pub async fn enqueue(
     })?;
     let category = control.category().as_str();
     let mut tx = pool.begin().await?;
+    if rated {
+        if let Some(until) = crate::fairplay::suspended_until(&mut *tx, user).await? {
+            return Err(GameError::Suspended(until));
+        }
+    }
     lock(&mut tx).await?;
     clean(&mut tx).await?;
     let rating: Option<f64> =

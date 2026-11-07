@@ -139,6 +139,11 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "already_matched",
                 "a game was already found for you; see GET /v1/matchmaking",
             ),
+            Suspended(until) => ApiError::Coded(
+                StatusCode::FORBIDDEN,
+                "rated_play_suspended",
+                format!("your rated play is suspended until {until}; unrated games are still open to you"),
+            ),
             NotStarted => conflict(
                 "game_not_started",
                 "the game has not started: it is waiting for an opponent",
