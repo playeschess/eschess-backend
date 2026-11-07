@@ -1,0 +1,13 @@
+[package]
+name = "eschess-fairplay"
+description = "Fair play's public interface: the game record a scorer reads, the score it returns, and the rules a score must follow. No database, no heuristics."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eschess-domain = { path = "../domain" }
+eschess-game = { path = "../game" }
+serde_json.workspace = true
+uuid.workspace = true

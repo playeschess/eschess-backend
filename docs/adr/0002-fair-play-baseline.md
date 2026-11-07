@@ -72,6 +72,10 @@ pub trait Scorer: Send + Sync {
 `score` is synchronous and pure. A scorer that needs an engine runs it inside its own worker before or around this call;
 the backend never runs an engine.
 
+The backend does not trust what a scorer returns, since it cannot see the code. Before anything is stored, the public
+`check` refuses the whole batch if any score is for someone who did not play, is a second score for one player, is above
+100, names a different scorer, or carries an oversized summary or evidence.
+
 ### 3. Data capture
 
 `game_moves` already holds the move, the position after it, the time charged, the lag credited, the clock left, and when
