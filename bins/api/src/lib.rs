@@ -93,6 +93,18 @@ pub fn app(state: AppState) -> Router {
             "/v1/admin/fairplay/cases/{id}/confirm",
             post(routes::fairplay::confirm),
         )
+        .route(
+            "/v1/admin/fairplay/closures",
+            get(routes::fairplay::pending_closures),
+        )
+        .route(
+            "/v1/admin/fairplay/cases/{id}/closure/approve",
+            post(routes::fairplay::approve_closure),
+        )
+        .route(
+            "/v1/admin/fairplay/cases/{id}/closure/decline",
+            post(routes::fairplay::decline_closure),
+        )
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

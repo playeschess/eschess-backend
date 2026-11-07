@@ -539,13 +539,15 @@ impl Decision {
     }
 }
 
-/// What a confirmed case does to the player (ADR 0003 §3). Closure is not here yet: it needs a second reviewer.
+/// What a confirmed case does to the player (ADR 0003 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sanction {
     /// Recorded; restricts nothing.
     Warning,
     /// No rated or staked play for this many days (1 to 365).
     Suspension { days: u32 },
+    /// Proposed by the confirming reviewer; takes effect only when a second reviewer approves it.
+    Closure,
 }
 
 pub const MAX_SUSPENSION_DAYS: u32 = 365;
@@ -670,8 +672,13 @@ pub async fn decide(
     .await?;
     if let Some(sanction) = sanction {
         let days = match sanction {
-            Sanction::Warning => None,
+            Sanction::Warning | Sanction::Closure => None,
             Sanction::Suspension { days } => Some(days as i32),
+        };
+        let kind = match sanction {
+            Sanction::Warning => "warning",
+            Sanction::Suspension { .. } => "suspension",
+            Sanction::Closure => "closure",
         };
         sqlx::query(
             "INSERT INTO fairplay_sanctions (id, case_id, player_id, kind, ends_at) \
@@ -679,7 +686,7 @@ pub async fn decide(
              FROM fairplay_cases c WHERE c.id = $4",
         )
         .bind(Uuid::now_v7())
-        .bind(if days.is_some() { "suspension" } else { "warning" })
+        .bind(kind)
         .bind(days)
         .bind(case)
         .execute(&mut *tx)
@@ -706,4 +713,155 @@ pub async fn suspended_until<'e>(
     .bind(player)
     .fetch_one(db)
     .await
+}
+
+/// Whether the account was closed (a closure approved by a second reviewer). Permanent in this version.
+pub async fn is_closed<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    player: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fairplay_sanctions z JOIN fairplay_closure_reviews r ON r.sanction_id = z.id \
+         WHERE z.player_id = $1 AND z.kind = 'closure' AND r.decision = 'approved')",
+    )
+    .bind(player)
+    .fetch_one(db)
+    .await
+}
+
+/// A closure waiting for its second reviewer.
+#[derive(Debug, Clone)]
+pub struct PendingClosure {
+    pub case_id: Uuid,
+    pub player_id: Uuid,
+    pub username: String,
+    pub proposed_by: Uuid,
+    pub reason: String,
+}
+
+/// Closures proposed and not yet reviewed, oldest first.
+pub async fn pending_closures(pool: &PgPool) -> Result<Vec<PendingClosure>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT c.id, c.player_id, u.username, c.decided_by, c.reason FROM fairplay_sanctions z \
+         JOIN fairplay_cases c ON c.id = z.case_id JOIN users u ON u.id = c.player_id \
+         WHERE z.kind = 'closure' AND NOT EXISTS (SELECT 1 FROM fairplay_closure_reviews r WHERE r.sanction_id = z.id) \
+         ORDER BY z.imposed_at, z.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| PendingClosure {
+            case_id: r.get("id"),
+            player_id: r.get("player_id"),
+            username: r.get("username"),
+            proposed_by: r.get("decided_by"),
+            reason: r.get("reason"),
+        })
+        .collect())
+}
+
+#[derive(Debug)]
+pub enum ClosureError {
+    /// No such pending closure, or the person may not review it (not a reviewer, the proposer, involved): not told which.
+    NotFound,
+    InvalidReason,
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for ClosureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClosureError::NotFound => write!(f, "no such closure to review"),
+            ClosureError::InvalidReason => {
+                write!(f, "a reason of 1 to 2000 characters is required")
+            }
+            ClosureError::Database(e) => write!(f, "database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ClosureError {}
+
+impl From<sqlx::Error> for ClosureError {
+    fn from(e: sqlx::Error) -> Self {
+        ClosureError::Database(e)
+    }
+}
+
+/// A second reviewer approves or declines the closure proposed with `case`. Approving closes the account at once:
+/// their open games are cancelled, their live games resigned (the opponents win), and they leave the queue. Declining
+/// leaves the case confirmed with no restriction.
+pub async fn review_closure(
+    pool: &PgPool,
+    case: Uuid,
+    reviewer: Uuid,
+    approve: bool,
+    reason: &str,
+) -> Result<(), ClosureError> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.chars().count() > 2_000 {
+        return Err(ClosureError::InvalidReason);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM fairplay_cases WHERE id = $1 FOR UPDATE")
+        .bind(case)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT z.id, z.player_id FROM fairplay_sanctions z WHERE z.case_id = $1 AND z.kind = 'closure' \
+         AND NOT EXISTS (SELECT 1 FROM fairplay_closure_reviews r WHERE r.sanction_id = z.id) \
+         AND EXISTS (SELECT 1 FROM user_roles WHERE user_id = $2 AND role = $3) \
+         AND $2 <> z.player_id AND $2 <> (SELECT decided_by FROM fairplay_cases WHERE id = $1) \
+         AND NOT EXISTS (SELECT 1 FROM fairplay_case_games cg JOIN games g ON g.id = cg.game_id \
+                          WHERE cg.case_id = $1 AND $2 IN (g.white_id, g.black_id))",
+    )
+    .bind(case)
+    .bind(reviewer)
+    .bind(REVIEWER_ROLE)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((sanction, player)) = row else {
+        return Err(ClosureError::NotFound);
+    };
+    sqlx::query("INSERT INTO fairplay_closure_reviews (sanction_id, reviewer_id, decision, reason) VALUES ($1, $2, $3, $4)")
+        .bind(sanction)
+        .bind(reviewer)
+        .bind(if approve { "approved" } else { "declined" })
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    if approve {
+        sqlx::query("DELETE FROM match_queue WHERE user_id = $1 AND game_id IS NULL")
+            .bind(player)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    if approve {
+        end_games_of(pool, player).await?;
+    }
+    Ok(())
+}
+
+/// Cancels the closed player's open games and resigns their live ones. Best effort per game: a game that ended in the
+/// meantime is already over, which is the goal.
+async fn end_games_of(pool: &PgPool, player: Uuid) -> Result<(), sqlx::Error> {
+    let games: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, status FROM games WHERE status IN ('waiting', 'active') \
+         AND (created_by = $1 OR white_id = $1 OR black_id = $1)",
+    )
+    .bind(player)
+    .fetch_all(pool)
+    .await?;
+    for (id, status) in games {
+        let _ = if status == "waiting" {
+            crate::games::cancel_game(pool, id, player)
+                .await
+                .map(|_| ())
+        } else {
+            crate::games::resign(pool, id, player).await.map(|_| ())
+        };
+    }
+    Ok(())
 }

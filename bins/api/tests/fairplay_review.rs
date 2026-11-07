@@ -328,12 +328,12 @@ async fn confirming_needs_a_sensible_sanction_and_clearing_has_none(pool: PgPool
         let (status, b) = api.post(&confirm, &rev, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{b}");
     }
-    // Closure is not available yet; the body is not understood at all.
+    // A sanction of a kind that does not exist is not understood at all.
     let (status, b) = api
         .post(
             &confirm,
             &rev,
-            confirmation("closure", &[game], json!({ "kind": "closure" })),
+            confirmation("nonsense", &[game], json!({ "kind": "exile" })),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
