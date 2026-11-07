@@ -8,6 +8,7 @@ crates/domain   pure rules: money, chess, game clock (rating to come); no I/O
 crates/notification  sending email (log, in-memory for tests, or any SMTP provider)
 crates/auth     password hashing, tokens, input validation (no database)
 crates/ledger   double-entry postings and idempotency keys (pure, no database)
+crates/fairplay fair play's public interface: the game record a scorer reads, the score it returns (no heuristics)
 crates/stellar  the Stellar network: reading deposits, building and signing payments (no database)
 crates/storage  PostgreSQL access: migrations, ledger, identity
 bins/api        REST API

@@ -120,6 +120,32 @@ pub struct GameView {
 }
 
 /// What a move did, for the reply to the player who made it.
+/// How a move reached the server, and what the server measured about the connection. Recorded with the move for fair
+/// play (ADR 0002 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// Plain HTTP: the server cannot measure the player's lag, so none is refunded.
+    Http,
+    /// The WebSocket, with the lag the server measured for this connection.
+    WebSocket { measured_lag_ms: u64 },
+}
+
+impl Transport {
+    fn measured_lag_ms(self) -> Option<u64> {
+        match self {
+            Transport::Http => None,
+            Transport::WebSocket { measured_lag_ms } => Some(measured_lag_ms),
+        }
+    }
+
+    fn as_db(self) -> &'static str {
+        match self {
+            Transport::Http => "http",
+            Transport::WebSocket { .. } => "ws",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MoveReceipt {
     pub ply: i32,
@@ -592,7 +618,7 @@ pub async fn play_move(
     actor: Uuid,
     uci: &str,
     client_move_id: Uuid,
-    measured_lag_ms: u64,
+    transport: Transport,
 ) -> Result<(GameView, MoveReceipt)> {
     let mut tx = pool.begin().await?;
     let (row, moves, now) = lock_for_player(&mut tx, id, actor).await?;
@@ -622,9 +648,10 @@ pub async fn play_move(
     }
 
     let game = active_game(&row, &moves)?;
-    // `measured_lag_ms` is what the server itself measured for this player's connection (0 over plain HTTP, which
-    // offers no way to measure it): the clock refunds part of it, within its caps and quota.
-    match eschess_game::play_move(&game, actor, uci, now as u64, measured_lag_ms)? {
+    // The lag is what the server itself measured for this player's connection (none over plain HTTP, which offers no
+    // way to measure it): the clock refunds part of it, within its caps and quota.
+    let measured_lag_ms = transport.measured_lag_ms();
+    match eschess_game::play_move(&game, actor, uci, now as u64, measured_lag_ms.unwrap_or(0))? {
         MoveOutcome::Flagged(ended) => {
             finish(&mut tx, id, ended).await?;
             tx.commit().await?;
@@ -634,7 +661,7 @@ pub async fn play_move(
             let ply = row.ply + 1;
             let state = applied.clock.state();
             let mover = game.color_of(actor).expect("checked by the move loop");
-            sqlx::query("INSERT INTO game_moves (game_id, ply, uci, fen_after, mover_id, client_move_id, charged_ms, credited_ms, remaining_ms_after, played_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+            sqlx::query("INSERT INTO game_moves (game_id, ply, uci, fen_after, mover_id, client_move_id, charged_ms, credited_ms, remaining_ms_after, played_at_ms, transport, lag_measured_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
                 .bind(id)
                 .bind(ply)
                 .bind(applied.mv.to_uci())
@@ -645,6 +672,8 @@ pub async fn play_move(
                 .bind(applied.credited_ms as i64)
                 .bind(applied.clock.banked_ms(mover) as i64)
                 .bind(now)
+                .bind(transport.as_db())
+                .bind(measured_lag_ms.map(|l| l as i64))
                 .execute(&mut *tx)
                 .await?;
             sqlx::query(

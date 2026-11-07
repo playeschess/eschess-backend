@@ -64,6 +64,26 @@ pub enum EndReason {
 }
 
 impl EndReason {
+    /// Every reason, so a name can be read back without a second list to keep in step.
+    pub const ALL: [EndReason; 11] = [
+        EndReason::Checkmate,
+        EndReason::Resignation,
+        EndReason::Timeout,
+        EndReason::TimeoutInsufficientMaterial,
+        EndReason::Stalemate,
+        EndReason::InsufficientMaterial,
+        EndReason::FivefoldRepetition,
+        EndReason::SeventyFiveMoveRule,
+        EndReason::ThreefoldRepetition,
+        EndReason::FiftyMoveRule,
+        EndReason::Agreement,
+    ];
+
+    /// Reads a name written by [`EndReason::as_str`].
+    pub fn parse(text: &str) -> Option<EndReason> {
+        EndReason::ALL.into_iter().find(|r| r.as_str() == text)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             EndReason::Checkmate => "checkmate",
@@ -740,6 +760,14 @@ mod tests {
             play_move(&g, white, "e2e4", 1_000, 0).unwrap_err(),
             Refusal::CorruptHistory
         );
+    }
+
+    #[test]
+    fn every_end_reason_reads_back_from_its_name() {
+        for r in EndReason::ALL {
+            assert_eq!(EndReason::parse(r.as_str()), Some(r));
+        }
+        assert_eq!(EndReason::parse("abandoned"), None);
     }
 
     #[test]

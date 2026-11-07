@@ -193,7 +193,8 @@ pub async fn play_move(
         user.user_id,
         b.uci.trim(),
         b.client_move_id,
-        0, // plain HTTP offers no way to measure lag, so no refund; the WebSocket route measures it
+        // Plain HTTP offers no way to measure lag, so none is refunded; the WebSocket route measures it.
+        games::Transport::Http,
     )
     .await?;
     Ok(Json(

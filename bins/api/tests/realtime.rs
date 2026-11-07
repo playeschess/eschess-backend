@@ -909,3 +909,102 @@ async fn draw_offers_and_their_answers_are_pushed_to_both_players(pool: PgPool) 
         (Some("draw"), Some("agreement"), true)
     );
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn each_move_records_how_it_arrived_and_the_lag_measured_for_fair_play(pool: PgPool) {
+    use eschess_fairplay::Transport;
+    use eschess_storage::fairplay::game_record;
+
+    let api = Api::with_config(
+        pool,
+        Config {
+            ws_ping_interval_ms: 300,
+            ws_pong_timeout_ms: 5_000,
+            ..fast()
+        },
+    );
+    let addr = api.serve().await;
+    let (ada, grace, id) = game(&api).await;
+    let mut a = Client::hello(addr, &ada).await;
+    a.pong_delay = Duration::from_millis(120);
+    a.subscribe(id).await;
+    a.quiet_for(1_000).await; // let the server measure ada's connection
+
+    // White moves over the WebSocket, Black over plain HTTP.
+    a.move_request(id, "e2e4", Uuid::now_v7()).await;
+    let accepted = a.expect("MOVE_ACCEPTED").await;
+    let measured = accepted["measured_lag_ms"].as_u64().unwrap();
+    let credited = accepted["credited_ms"].as_u64().unwrap();
+    assert!(measured > 0, "a slow connection has some lag");
+    let (status, _) = api
+        .post(
+            &format!("/v1/games/{id}/moves"),
+            &grace,
+            json!({ "uci": "e7e5", "client_move_id": Uuid::now_v7() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A game still being played is not scored: a scorer would only see half of it.
+    assert!(game_record(&api.pool, id).await.unwrap().is_none());
+
+    let (status, _) = api
+        .post(&format!("/v1/games/{id}/resign"), &ada, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let record = game_record(&api.pool, id).await.unwrap().unwrap();
+    assert_eq!(record.result, eschess_game::GameResult::Black);
+    assert_eq!(
+        record.end_reason,
+        Some(eschess_game::EndReason::Resignation)
+    );
+    assert_eq!(record.time_control.base_ms, 300_000);
+    assert!(record.rated);
+    assert_eq!(record.moves.len(), 2);
+
+    let (w, b) = (&record.moves[0], &record.moves[1]);
+    assert_eq!(
+        (w.ply, w.uci.as_str(), w.mover),
+        (1, "e2e4", eschess_domain::chess::Color::White)
+    );
+    assert_eq!(w.transport, Transport::WebSocket);
+    assert_eq!(
+        w.lag_measured_ms,
+        Some(measured),
+        "what the server measured, as it told the player"
+    );
+    assert_eq!(w.lag_credited_ms, credited);
+    assert_eq!(
+        w.fen_before,
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    );
+    assert_eq!(
+        (b.ply, b.uci.as_str(), b.mover),
+        (2, "e7e5", eschess_domain::chess::Color::Black)
+    );
+    assert_eq!(b.transport, Transport::Http);
+    assert_eq!(b.lag_measured_ms, None, "plain HTTP cannot measure lag");
+    assert_eq!(b.lag_credited_ms, 0);
+    assert_eq!(
+        b.fen_before, w.fen_after,
+        "each move starts where the last one ended"
+    );
+
+    // The database refuses a measured lag on a move that did not come over the WebSocket.
+    let refused = sqlx::query(
+        "INSERT INTO game_moves (game_id, ply, uci, fen_after, mover_id, client_move_id, charged_ms, credited_ms, \
+         remaining_ms_after, played_at_ms, transport, lag_measured_ms) \
+         SELECT game_id, 3, 'g1f3', fen_after, mover_id, $2, 0, 0, 0, 0, 'http', 50 FROM game_moves WHERE game_id = $1 AND ply = 1",
+    )
+    .bind(id)
+    .bind(Uuid::now_v7())
+    .execute(&api.pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refused.as_database_error().and_then(|e| e.constraint()),
+        Some("game_moves_lag_only_over_ws"),
+        "{refused}"
+    );
+}

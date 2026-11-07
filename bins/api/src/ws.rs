@@ -372,7 +372,9 @@ async fn on_text(state: &AppState, live: &mut Live, text: &str) -> Next {
                 live.user,
                 uci.trim(),
                 client_move_id,
-                lag,
+                games::Transport::WebSocket {
+                    measured_lag_ms: lag,
+                },
             )
             .await
             {

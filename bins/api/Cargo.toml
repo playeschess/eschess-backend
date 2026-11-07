@@ -29,6 +29,8 @@ tokio-tungstenite = "0.26"
 eschess-domain = { path = "../../crates/domain" }
 eschess-auth = { path = "../../crates/auth" }
 eschess-ledger = { path = "../../crates/ledger" }
+eschess-fairplay = { path = "../../crates/fairplay" }
+eschess-game = { path = "../../crates/game" }
 async-trait.workspace = true
 tower.workspace = true
 http-body-util.workspace = true
