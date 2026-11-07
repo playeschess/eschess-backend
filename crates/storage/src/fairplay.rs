@@ -539,8 +539,21 @@ impl Decision {
     }
 }
 
+/// What a confirmed case does to the player (ADR 0003 §3). Closure is not here yet: it needs a second reviewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sanction {
+    /// Recorded; restricts nothing.
+    Warning,
+    /// No rated or staked play for this many days (1 to 365).
+    Suspension { days: u32 },
+}
+
+pub const MAX_SUSPENSION_DAYS: u32 = 365;
+
 #[derive(Debug)]
 pub enum DecideError {
+    /// Confirming needs a sanction, clearing must not have one, and a suspension is 1 to 365 days.
+    BadSanction(&'static str),
     /// No such case, or the person may not review it (no role, or involved): they are not told which.
     NotFound,
     /// Already decided; a decision is final.
@@ -557,6 +570,7 @@ impl std::fmt::Display for DecideError {
         match self {
             DecideError::NotFound => write!(f, "no such case"),
             DecideError::AlreadyDecided(s) => write!(f, "the case is already {s}"),
+            DecideError::BadSanction(why) => write!(f, "{why}"),
             DecideError::InvalidReason => write!(f, "a reason of 1 to 2000 characters is required"),
             DecideError::CaseChanged => write!(f, "the case has changed since it was looked at"),
             DecideError::Database(e) => write!(f, "database error: {e}"),
@@ -585,7 +599,22 @@ pub async fn decide(
     decision: Decision,
     reason: &str,
     seen: &[Uuid],
+    sanction: Option<Sanction>,
 ) -> Result<CaseSummary, DecideError> {
+    match (decision, sanction) {
+        (Decision::Confirm, None) => {
+            return Err(DecideError::BadSanction(
+                "confirming a case needs a sanction",
+            ))
+        }
+        (Decision::Clear, Some(_)) => {
+            return Err(DecideError::BadSanction("clearing a case has no sanction"))
+        }
+        (_, Some(Sanction::Suspension { days })) if !(1..=MAX_SUSPENSION_DAYS).contains(&days) => {
+            return Err(DecideError::BadSanction("a suspension is 1 to 365 days"))
+        }
+        _ => {}
+    }
     let reason = reason.trim();
     if reason.is_empty() || reason.chars().count() > 2_000 {
         return Err(DecideError::InvalidReason);
@@ -639,6 +668,23 @@ pub async fn decide(
     .bind(reason)
     .execute(&mut *tx)
     .await?;
+    if let Some(sanction) = sanction {
+        let days = match sanction {
+            Sanction::Warning => None,
+            Sanction::Suspension { days } => Some(days as i32),
+        };
+        sqlx::query(
+            "INSERT INTO fairplay_sanctions (id, case_id, player_id, kind, ends_at) \
+             SELECT $1, c.id, c.player_id, $2, CASE WHEN $3::int IS NULL THEN NULL ELSE now() + make_interval(days => $3::int) END \
+             FROM fairplay_cases c WHERE c.id = $4",
+        )
+        .bind(Uuid::now_v7())
+        .bind(if days.is_some() { "suspension" } else { "warning" })
+        .bind(days)
+        .bind(case)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     let r = sqlx::query(&format!("{CASE_SUMMARY} WHERE c.id = $1"))
         .bind(case)
