@@ -787,6 +787,19 @@ pub async fn with_status(pool: &PgPool, status: Status, limit: i64) -> Result<Ve
     Ok(rows.iter().map(row).collect())
 }
 
+/// The oldest approved withdrawal whose owner has no open fair-play case (ADR 0003 §2). A held one is not rejected or
+/// changed: it stays approved and is sent once the case is cleared. Withdrawals already being sent are not affected.
+pub async fn next_approved_not_held(pool: &PgPool) -> Result<Option<Withdrawal>> {
+    let found = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM withdrawals w WHERE status = 'approved' \
+         AND NOT EXISTS (SELECT 1 FROM fairplay_cases c WHERE c.player_id = w.user_id AND c.status = 'open') \
+         ORDER BY requested_at, id LIMIT 1"
+    ))
+    .fetch_optional(pool)
+    .await?;
+    Ok(found.as_ref().map(row))
+}
+
 /// How much of `asset` the player has asked to withdraw in the last `hours` hours, not counting withdrawals that were
 /// cancelled, rejected or failed (that money never left). For the daily limit.
 pub async fn withdrawn_recently<'e>(

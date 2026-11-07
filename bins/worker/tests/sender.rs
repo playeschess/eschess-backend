@@ -564,3 +564,41 @@ fn sender_settings_that_would_break_sending_are_refused() {
     assert!(load(&[("WITHDRAW_TX_TIMEOUT_SECS", "0")]).is_err());
     assert!(load(&[("WITHDRAW_EXPIRY_MARGIN_SECS", "-1")]).is_err());
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_player_with_an_open_fair_play_case_waits_and_does_not_block_others(pool: PgPool) {
+    let net = Net::new();
+    let (held_user, held) = approved(&pool, 10_000_000, DEST, PaymentMemo::None).await;
+    let (_, other) = approved(&pool, 20_000_000, DEST, PaymentMemo::None).await;
+    let case = Uuid::now_v7();
+    sqlx::query("INSERT INTO fairplay_cases (id, player_id) VALUES ($1, $2)")
+        .bind(case)
+        .bind(held_user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The older, held withdrawal is skipped; the other player's is sent.
+    let r = round(&pool, &net, NOW).await;
+    assert_eq!(r.sent, Some(other));
+    assert_eq!(status(&pool, other).await, Status::Confirmed);
+    assert_eq!(status(&pool, held).await, Status::Approved);
+
+    // Nothing else goes out while the case is open.
+    let r = round(&pool, &net, NOW + 10).await;
+    assert_eq!(r.sent, None);
+    assert_eq!(status(&pool, held).await, Status::Approved);
+
+    // Cleared: it is sent, unchanged.
+    let reviewer = user(&pool).await;
+    sqlx::query("UPDATE fairplay_cases SET status = 'cleared', decided_by = $2, decided_at = now(), reason = 'looked fine' WHERE id = $1")
+        .bind(case)
+        .bind(reviewer)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let r = round(&pool, &net, NOW + 20).await;
+    assert_eq!(r.sent, Some(held));
+    assert_eq!(status(&pool, held).await, Status::Confirmed);
+}
