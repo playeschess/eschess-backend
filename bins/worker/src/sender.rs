@@ -106,11 +106,15 @@ pub async fn tick(
     now: i64,
 ) -> Result<TickReport, String> {
     let mut lock = pool.begin().await.map_err(|e| e.to_string())?;
-    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1))")
-        .bind(format!("withdrawal-sender:{}", config.hot_account.to_g()))
-        .fetch_one(&mut *lock)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Advisory locks are shared by every database on the server, so the key names this database: rounds for
+    // different databases (parallel test databases, say) must not make each other skip.
+    let got: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtext(current_database() || ':' || $1))",
+    )
+    .bind(format!("withdrawal-sender:{}", config.hot_account.to_g()))
+    .fetch_one(&mut *lock)
+    .await
+    .map_err(|e| e.to_string())?;
     if !got {
         return Ok(TickReport {
             skipped: true,
