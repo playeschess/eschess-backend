@@ -30,6 +30,8 @@ pub enum GameError {
     AlreadyMatched,
     /// Moving in a game that is still waiting for an opponent.
     NotStarted,
+    /// The player's rated play is suspended until this time (a fair-play sanction, ADR 0003).
+    Suspended(String),
     /// The player's app reused a `client_move_id` for a different move.
     MoveIdReused,
     /// The rules said no (illegal move, not your turn, game over ...).
@@ -48,6 +50,9 @@ impl fmt::Display for GameError {
                 write!(f, "you already have {MAX_OPEN_GAMES} open games")
             }
             GameError::AlreadyMatched => write!(f, "a game was already found for you"),
+            GameError::Suspended(until) => {
+                write!(f, "your rated play is suspended until {until}")
+            }
             GameError::NotStarted => {
                 write!(f, "the game has not started: it is waiting for an opponent")
             }
@@ -429,6 +434,11 @@ pub async fn create_game(
     let id = Uuid::now_v7();
     let clock = Clock::start(control, LagPolicy::default(), 0).state();
     let mut tx = pool.begin().await?;
+    if rated {
+        if let Some(until) = crate::fairplay::suspended_until(&mut *tx, creator).await? {
+            return Err(GameError::Suspended(until));
+        }
+    }
     // Two requests from one player at the same moment must not both slip under the limit.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("open-games:{creator}"))
@@ -534,6 +544,11 @@ pub async fn join_game(
     }
     if row.created_by == joiner {
         return Err(GameError::OwnGame);
+    }
+    if row.rated {
+        if let Some(until) = crate::fairplay::suspended_until(&mut *tx, joiner).await? {
+            return Err(GameError::Suspended(until));
+        }
     }
     let creator_white = match row.color_preference.as_str() {
         "white" => true,

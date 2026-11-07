@@ -291,7 +291,8 @@ repository has the plumbing, and a scorer that gives everyone 0.
   `INSERT INTO user_roles (user_id, role) VALUES ('<id>', 'fairplay_reviewer')`) see the queue at
   `/v1/admin/fairplay/cases`, open a case to see every game's moves, clocks, lag, scores and evidence, and clear or
   confirm it with a written reason; a confirmation names a sanction (a warning, or a suspension of 1 to 365 days),
-  recorded with it. Nothing enforces a suspension yet. A decision is final.
+  recorded with it. A suspended player cannot create, join or queue for rated games until it ends (403
+  `rated_play_suspended`); unrated play is unaffected. A decision is final.
   - Everyone else gets 404, so a player cannot learn they are under review. A reviewer never sees, let alone decides, a
     case about themselves **or about a game they played in** (the opponent has a stake); the database refuses it too.
   - The decision lists the games the reviewer looked at. If the worker added a game to the case since, it is refused
