@@ -12,7 +12,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use eschess_fairplay::{GameRecord, Transport};
-use eschess_storage::fairplay::{self, CaseSummary, DecideError, Decision, Sanction, StoredScore};
+use eschess_storage::fairplay::{
+    self, CaseSummary, ClosureError, DecideError, Decision, Sanction, StoredScore,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -137,7 +139,11 @@ pub struct DecideBody {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum SanctionBody {
     Warning,
-    Suspension { days: u32 },
+    Suspension {
+        days: u32,
+    },
+    /// Proposes closing the account; a second reviewer must approve it.
+    Closure,
 }
 
 async fn decide(
@@ -158,6 +164,7 @@ async fn decide(
         body.sanction.as_ref().map(|s| match s {
             SanctionBody::Warning => Sanction::Warning,
             SanctionBody::Suspension { days } => Sanction::Suspension { days: *days },
+            SanctionBody::Closure => Sanction::Closure,
         }),
     )
     .await
@@ -202,4 +209,65 @@ pub async fn confirm(
     Json(b): Json<DecideBody>,
 ) -> Result<Json<Value>, ApiError> {
     decide(&state, &user, id, Decision::Confirm, &b).await
+}
+
+/// Closures proposed and waiting for a second reviewer (not their proposer, the player, or anyone in the case).
+pub async fn pending_closures(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    reviewer(&state, &user).await?;
+    let list = fairplay::pending_closures(&state.pool)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "closures": list.iter().map(|c| json!({
+        "case_id": c.case_id, "player": { "id": c.player_id, "username": c.username },
+        "proposed_by": c.proposed_by, "reason": c.reason,
+    })).collect::<Vec<_>>() })))
+}
+
+#[derive(Deserialize)]
+pub struct ClosureBody {
+    reason: String,
+}
+
+async fn review_closure(
+    state: &AppState,
+    user: &AuthUser,
+    case: Uuid,
+    approve: bool,
+    body: &ClosureBody,
+) -> Result<Json<Value>, ApiError> {
+    reviewer(state, user).await?;
+    fairplay::review_closure(&state.pool, case, user.user_id, approve, &body.reason)
+        .await
+        .map_err(|e| match e {
+            ClosureError::NotFound => ApiError::NotFound,
+            ClosureError::InvalidReason => ApiError::Validation(
+                "reason: 1 to 2000 characters, saying what was looked at and why".into(),
+            ),
+            ClosureError::Database(e) => ApiError::internal(e),
+        })?;
+    tracing::info!(case = %case, reviewer = %user.user_id, approve, "account closure reviewed");
+    Ok(Json(
+        json!({ "case_id": case, "closure": if approve { "approved" } else { "declined" } }),
+    ))
+}
+
+pub async fn approve_closure(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ClosureBody>,
+) -> Result<Json<Value>, ApiError> {
+    review_closure(&state, &user, id, true, &b).await
+}
+
+pub async fn decline_closure(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ClosureBody>,
+) -> Result<Json<Value>, ApiError> {
+    review_closure(&state, &user, id, false, &b).await
 }

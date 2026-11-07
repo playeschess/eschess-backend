@@ -602,3 +602,35 @@ async fn a_player_with_an_open_fair_play_case_waits_and_does_not_block_others(po
     assert_eq!(r.sent, Some(held));
     assert_eq!(status(&pool, held).await, Status::Confirmed);
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_closed_accounts_withdrawal_always_waits_for_a_person(pool: PgPool) {
+    let net = Net::new();
+    let closed = user(&pool).await;
+    let (proposer, second) = (user(&pool).await, user(&pool).await);
+    let (case, sanction) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query("INSERT INTO fairplay_cases (id, player_id, status, decided_by, decided_at, reason) VALUES ($1, $2, 'confirmed', $3, now(), 'x')")
+        .bind(case).bind(closed).bind(proposer).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO fairplay_sanctions (id, case_id, player_id, kind) VALUES ($1, $2, $3, 'closure')")
+        .bind(sanction).bind(case).bind(closed).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO fairplay_closure_reviews (sanction_id, reviewer_id, decision, reason) VALUES ($1, $2, 'approved', 'x')")
+        .bind(sanction).bind(second).execute(&pool).await.unwrap();
+
+    // Small enough to be approved at once for anyone else (see `approved`), but not for a closed account.
+    let (w, _) = withdrawals::request(
+        &pool,
+        &NewWithdrawal {
+            user_id: closed,
+            client_request_id: Uuid::now_v7(),
+            amount: Amount::new(1_000_000, usdc()).unwrap(),
+            destination: DEST.into(),
+            memo: PaymentMemo::None,
+        },
+        POLICY,
+    )
+    .await
+    .unwrap();
+    assert_eq!(w.status, Status::AwaitingApproval);
+    assert_eq!(round(&pool, &net, NOW).await.sent, None);
+}

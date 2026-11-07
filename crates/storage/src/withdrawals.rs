@@ -482,7 +482,9 @@ pub async fn request(
     }
 
     let (memo_type, memo) = memo_to_db(&new.memo);
-    let status = if new.amount.minor() <= policy.auto_approve_up_to_minor {
+    // A closed account's money leaves only after a person has looked (ADR 0003 §3: the final check).
+    let closed = crate::fairplay::is_closed(&mut *tx, new.user_id).await?;
+    let status = if !closed && new.amount.minor() <= policy.auto_approve_up_to_minor {
         Status::Approved
     } else {
         Status::AwaitingApproval

@@ -193,13 +193,15 @@ pub struct Authenticated {
     pub user_id: Uuid,
     pub session_id: Uuid,
     pub email_verified: bool,
+    /// The account was closed for unfair play (ADR 0003): it may use its wallet and nothing else.
+    pub closed: bool,
 }
 
 /// Who an access token belongs to, if it is current: not expired, session not revoked or past its maximum
 /// age, and the player still active.
 pub async fn authenticate(pool: &PgPool, access_hash: &str) -> Result<Option<Authenticated>> {
     let row = sqlx::query(
-        "SELECT s.id, s.user_id, u.email_verified_at IS NOT NULL AS verified, s.last_seen_at < now() - interval '1 minute' AS stale
+        "SELECT s.id, s.user_id, u.email_verified_at IS NOT NULL AS verified, EXISTS (SELECT 1 FROM fairplay_sanctions z JOIN fairplay_closure_reviews r ON r.sanction_id = z.id WHERE z.player_id = u.id AND z.kind = 'closure' AND r.decision = 'approved') AS closed, s.last_seen_at < now() - interval '1 minute' AS stale
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.access_hash = $1 AND s.access_expires_at > now() AND s.revoked_at IS NULL AND s.absolute_expires_at > now() AND u.status = 'active'",
     )
@@ -211,6 +213,7 @@ pub async fn authenticate(pool: &PgPool, access_hash: &str) -> Result<Option<Aut
         user_id: row.get("user_id"),
         session_id: row.get("id"),
         email_verified: row.get("verified"),
+        closed: row.get("closed"),
     };
     if row.get::<bool, _>("stale") {
         sqlx::query("UPDATE sessions SET last_seen_at = now() WHERE id = $1")
@@ -292,6 +295,7 @@ pub async fn rotate(
         user_id,
         session_id,
         email_verified: false,
+        closed: false, // not looked up here: every request that uses the new token is checked
     }))
 }
 

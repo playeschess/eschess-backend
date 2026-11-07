@@ -201,6 +201,14 @@ async fn run(state: &AppState, stream: &mut SplitStream<WebSocket>, out: mpsc::S
         let _ = out.try_send(error_message("unauthorized", "sign in again", None));
         return;
     };
+    if me.closed {
+        let _ = out.try_send(error_message(
+            "account_closed",
+            "this account was closed and cannot play",
+            None,
+        ));
+        return;
+    }
     tracing::info!(
         "websocket connected: user {} speaking protocol version {version}",
         me.user_id
