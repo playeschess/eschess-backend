@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use eschess_fairplay::{GameRecord, Transport};
 use eschess_storage::fairplay::{
-    self, CaseSummary, ClosureError, DecideError, Decision, Sanction, StoredScore,
+    self, AppealError, CaseSummary, ClosureError, DecideError, Decision, Sanction, StoredScore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -270,4 +270,103 @@ pub async fn decline_closure(
     Json(b): Json<ClosureBody>,
 ) -> Result<Json<Value>, ApiError> {
     review_closure(&state, &user, id, false, &b).await
+}
+
+/// The player's own sanctions: what, when, whether it restricts them now, and the state of any appeal. Never the case.
+pub async fn my_sanctions(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    let list = fairplay::my_sanctions(&state.pool, user.user_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "sanctions": list.iter().map(|s| json!({
+        "id": s.id, "kind": s.kind, "imposed_at_ms": s.imposed_at_ms, "ends_at_ms": s.ends_at_ms,
+        "in_force": s.in_force, "appeal": s.appeal, "awaiting_second_reviewer": s.awaiting_second_reviewer,
+    })).collect::<Vec<_>>() })))
+}
+
+#[derive(Deserialize)]
+pub struct AppealBody {
+    statement: String,
+}
+
+/// Appeal a suspension or closure that restricts you, once, in your own words.
+pub async fn file_appeal(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<AppealBody>,
+) -> Result<Json<Value>, ApiError> {
+    let appeal = fairplay::file_appeal(&state.pool, user.user_id, id, &b.statement)
+        .await
+        .map_err(|e| match e {
+            AppealError::NotFound => ApiError::NotFound,
+            AppealError::AlreadyAppealed => ApiError::Coded(
+                StatusCode::CONFLICT,
+                "already_appealed",
+                "this sanction was already appealed; an appeal is made once".into(),
+            ),
+            AppealError::InvalidStatement => {
+                ApiError::Validation("statement: 1 to 4000 characters".into())
+            }
+            AppealError::Database(e) => ApiError::internal(e),
+        })?;
+    Ok(Json(json!({ "appeal_id": appeal, "status": "pending" })))
+}
+
+/// Appeals waiting for a reviewer.
+pub async fn pending_appeals(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    reviewer(&state, &user).await?;
+    let list = fairplay::pending_appeals(&state.pool)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "appeals": list.iter().map(|a| json!({
+        "id": a.id, "case_id": a.case_id, "player": { "id": a.player_id, "username": a.username },
+        "kind": a.kind, "statement": a.statement, "filed_at_ms": a.filed_at_ms,
+    })).collect::<Vec<_>>() })))
+}
+
+async fn decide_appeal(
+    state: &AppState,
+    user: &AuthUser,
+    appeal: Uuid,
+    overturn: bool,
+    body: &ClosureBody,
+) -> Result<Json<Value>, ApiError> {
+    reviewer(state, user).await?;
+    fairplay::decide_appeal(&state.pool, appeal, user.user_id, overturn, &body.reason)
+        .await
+        .map_err(|e| match e {
+            ClosureError::NotFound => ApiError::NotFound,
+            ClosureError::InvalidReason => ApiError::Validation(
+                "reason: 1 to 2000 characters, saying what was looked at and why".into(),
+            ),
+            ClosureError::Database(e) => ApiError::internal(e),
+        })?;
+    tracing::info!(appeal = %appeal, reviewer = %user.user_id, overturn, "fair-play appeal decided");
+    Ok(Json(
+        json!({ "appeal_id": appeal, "decision": if overturn { "overturned" } else { "upheld" } }),
+    ))
+}
+
+pub async fn overturn_appeal(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ClosureBody>,
+) -> Result<Json<Value>, ApiError> {
+    decide_appeal(&state, &user, id, true, &b).await
+}
+
+pub async fn uphold_appeal(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ClosureBody>,
+) -> Result<Json<Value>, ApiError> {
+    decide_appeal(&state, &user, id, false, &b).await
 }

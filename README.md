@@ -82,6 +82,10 @@ POST   /v1/admin/fairplay/cases/{id}/confirm  reviewers only: {reason, games, sa
 GET    /v1/admin/fairplay/closures                reviewers only: closures proposed and waiting for a second reviewer
 POST   /v1/admin/fairplay/cases/{id}/closure/approve  reviewers only, not the proposer: {reason}; closes the account
 POST   /v1/admin/fairplay/cases/{id}/closure/decline  reviewers only, not the proposer: {reason}; nothing happens to the player
+GET    /v1/me/sanctions         your own sanctions: kind, dates, whether in force, appeal state (never the case)
+POST   /v1/me/sanctions/{id}/appeal  {statement}: appeal a suspension or closure that restricts you, once (works when closed)
+GET    /v1/admin/fairplay/appeals                      reviewers only: appeals waiting for a decision
+POST   /v1/admin/fairplay/appeals/{id}/overturn|uphold reviewers only, with no part in the sanction: {reason}
 GET    /v1/leaderboard          the best players in a speed class (?category=blitz&limit=50)
 GET    /v1/ws                   WebSocket for live play (see below)
 GET    /health
@@ -298,7 +302,9 @@ repository has the plumbing, and a scorer that gives everyone 0.
   `rated_play_suspended`); unrated play is unaffected. A closure takes effect only when a second reviewer approves it: then the player's open
   games are cancelled, live ones resigned, and every route except `/v1/me`, `/v1/wallet/*` and `/v1/auth/*` answers 403
   `account_closed` (a new route is closed to them by default). Their withdrawals always wait for a person to approve.
-  A decision is final.
+  A decision is final. The player can appeal a restricting suspension or closure once; a reviewer who had no part in it
+  (not the confirmer, the closure's reviewer, or anyone in the case) upholds it or overturns it, which lifts the
+  restriction at once and keeps the record. Games a closure ended stay ended.
   - Everyone else gets 404, so a player cannot learn they are under review. A reviewer never sees, let alone decides, a
     case about themselves **or about a game they played in** (the opponent has a stake); the database refuses it too.
   - The decision lists the games the reviewer looked at. If the worker added a game to the case since, it is refused
