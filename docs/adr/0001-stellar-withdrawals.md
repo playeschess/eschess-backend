@@ -184,3 +184,5 @@ Each is one PR, tests first:
    time out, drop, and land late.
 5. **Live testnet run**: a real withdrawal end to end, plus a real muxed deposit (which also closes the open question from
    PR #9).
+
+All five steps are done (PRs #11/#12, #13, #14, #15, and the testnet run in the README, 2026-11-06).

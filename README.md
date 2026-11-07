@@ -232,9 +232,10 @@ network is refused on purpose until it is a deliberate step.
   after a crash between any two steps, never pays twice.
 - **Never a guess.** A payment with no deposit id, an unknown or conflicting one, an asset we do not accept, or a record we
   could not read is kept as `needs_review` with the reason, not credited and not dropped.
-- **Not built yet:** the naira on/off ramp. Muxed destinations are read from Horizon's
-  `to_muxed_id` field when present, and the memo path is the dependable one until a real muxed payment has been checked
-  against the live testnet.
+- **Both ways are checked on the live testnet.** Muxed destinations are read from Horizon's `to_muxed_id` field; a real
+  payment to an `M...` address with no memo was credited to the right player by its muxed id (see "Trying it on the
+  testnet" below).
+- **Not built yet:** the naira on/off ramp.
 
 ## Withdrawals (crates/storage, crates/stellar, bins/api, bins/worker) — testnet only
 
@@ -264,3 +265,26 @@ The design is [ADR 0001](docs/adr/0001-stellar-withdrawals.md). A player asks fo
     run without sending twice.
 - **Not built yet:** network fees in the ledger (recorded per attempt for now; see the ADR), channel accounts for more
   than one payment at a time, and production key custody (a KMS or HSM behind the same `Signer` trait).
+
+## Trying it on the testnet
+
+A real deposit and withdrawal, end to end, with disposable testnet wallets. Nothing here touches the public network.
+
+```
+python3 -m venv ~/.eschess-testnet/venv && ~/.eschess-testnet/venv/bin/pip install 'stellar-sdk==12.2.0'
+~/.eschess-testnet/venv/bin/python scripts/testnet_wallets.py
+```
+
+The script creates two wallets (or checks them on later runs), funds them with test XLM and adds a USDC trustline:
+`hot`, the platform wallet, and `external`, standing in for a player's own wallet. The secret keys go to
+`~/.eschess-testnet/` (outside the repo, readable only by you) and are never printed. Put the two lines it prints into
+`.env`, then get test USDC into the external wallet from https://faucet.circle.com (Stellar). If the faucet does not
+deliver, the testnet's exchange also sells Circle's test USDC for test XLM (a path payment from XLM to USDC).
+
+Then `make run` and `make worker`, sign up and confirm a player, send USDC from the external wallet to the player's
+`muxed_address` from `GET /v1/wallet/deposit-info`, and withdraw some back with `POST /v1/wallet/withdrawals`.
+
+First run (2026-11-06): 5 USDC sent to a player's `M...` address with no memo was credited by its muxed id about a second
+after it landed (tx `d936f27e…`); a 3 USDC withdrawal with a text memo was signed, recorded, sent and confirmed about 5
+seconds after it was asked for (tx `1dd957a7…`, `max_time` two minutes after it was built). Afterwards the hot wallet held
+2 USDC on chain, and the ledger agreed: custody 2, the player 2, pending 0, nothing in review.
