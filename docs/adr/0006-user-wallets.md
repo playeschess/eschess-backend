@@ -1,6 +1,6 @@
 # ADR 0006 — A wallet for every user
 
-**Status:** Proposed · **Date:** 2026-11-09 · **Follows:** ADR 0001 (money in and out), ADR 0004 (staked games), the escrow
+**Status:** Accepted by the owner on 2026-11-09 (decisions below) · **Date:** 2026-11-09 · **Follows:** ADR 0001 (money in and out), ADR 0004 (staked games), the escrow
 contract in `eschess-contracts` (see `plan.md`, steps 3 and 4)
 
 ## Why
@@ -118,13 +118,17 @@ says it holds" and is the new central safety check.
   could wait until a user's first deposit intent (e.g. opening the deposit screen).
 - **Lost master key** loses everyone's funds. Backup design is not optional.
 
-## Decisions needed from the owner
+## Decisions (owner, 2026-11-09)
 
-1. **Provision at signup, or at first deposit intent?** The first is simpler and instant; the second avoids paying a
-   reserve for people who never deposit. I recommend the second.
-2. **How much XLM per account** (reserve plus fees), and who funds it.
-3. **Where the master key lives** for the real network (a cloud key service, a hardware module) and who can use it.
-4. **Legal view on holding user keys**, as part of the review already needed for staking.
+1. **The on-chain account is set up at the user's first deposit intent**, not at signup. The address itself is generated
+   at signup, because that costs nothing.
+2. **XLM per account:** about 2 XLM per active user to start (the reserve plus fees), funded from a platform funding account
+   that we keep stocked by buying XLM on an exchange (free from the friendbot on the testnet). Reserve values are set by
+   the network and must be checked at launch. Later options: the platform pays fees by fee bump and sponsors the reserve,
+   so users hold no XLM of their own. The exact amount is a configuration value.
+3. **Master key:** the key service of the cloud that hosts the servers, used so the application never holds the master key.
+   Which cloud is not decided (it depends on where the servers run). Until then, a key file on the testnet only.
+4. **Holding user keys is acceptable to the owner.** It stays on the list for the legal review.
 
 ## Build order (after acceptance)
 
