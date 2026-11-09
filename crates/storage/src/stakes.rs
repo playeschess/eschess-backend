@@ -88,8 +88,28 @@ pub(crate) async fn account(
     owner: Option<Uuid>,
     normal_side: Side,
 ) -> Result<AccountId, GameError> {
+    // A platform account (no owner) must be exactly one per kind and asset. A unique index guarantees it where the
+    // database has no leftovers (migration 20261127); the lock and the oldest-first choice guarantee it everywhere.
+    if owner.is_none() {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("ledger-account:{kind}:{asset}"))
+            .execute(&mut *tx)
+            .await?;
+    }
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM ledger_accounts WHERE kind = $1 AND asset = $2 AND owner_id IS NOT DISTINCT FROM $3 ORDER BY id LIMIT 1",
+    )
+    .bind(kind)
+    .bind(asset.to_string())
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(id) = existing {
+        return Ok(AccountId(id));
+    }
+    let id = Uuid::now_v7();
     sqlx::query("INSERT INTO ledger_accounts (id, kind, asset, normal_side, allow_negative, owner_id) VALUES ($1,$2,$3,$4,FALSE,$5) ON CONFLICT DO NOTHING")
-        .bind(Uuid::now_v7())
+        .bind(id)
         .bind(kind)
         .bind(asset.to_string())
         .bind(normal_side.as_str())
@@ -97,7 +117,7 @@ pub(crate) async fn account(
         .execute(&mut *tx)
         .await?;
     let id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM ledger_accounts WHERE kind = $1 AND asset = $2 AND owner_id IS NOT DISTINCT FROM $3",
+        "SELECT id FROM ledger_accounts WHERE kind = $1 AND asset = $2 AND owner_id IS NOT DISTINCT FROM $3 ORDER BY id LIMIT 1",
     )
     .bind(kind)
     .bind(asset.to_string())
@@ -375,4 +395,43 @@ pub async fn settle(
         .await
         .map_err(|e| ledger_err(LedgerStoreError::from(e)))?;
     Ok(Ok(settled))
+}
+
+/// Escrow that does not equal the stakes it should hold, for one asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowMismatch {
+    pub asset: String,
+    /// What the `stake_escrow` account holds.
+    pub held_minor: i64,
+    /// What unsettled games say it should hold: one stake for a waiting game, two for one that started.
+    pub expected_minor: i64,
+}
+
+/// Compares each asset's escrow account with the stakes of the games that have not been settled. They must be equal at
+/// all times (ADR 0004 §7); any difference is a bug or a broken invariant and should raise an alarm, not be repaired
+/// silently. One statement, so both sides come from one snapshot and a game opening mid-check is not a false alarm.
+pub async fn escrow_mismatches(pool: &PgPool) -> Result<Vec<EscrowMismatch>, sqlx::Error> {
+    let rows = sqlx::query(
+        "WITH expected AS ( \
+             SELECT stake_asset AS asset, \
+                    SUM(CASE WHEN status = 'waiting' THEN stake_minor WHEN status IN ('active', 'finished') THEN 2 * stake_minor ELSE 0 END)::bigint AS minor \
+             FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL GROUP BY stake_asset), \
+         held AS ( \
+             SELECT a.asset, SUM(COALESCE(b.balance_minor, 0))::bigint AS minor FROM ledger_accounts a \
+             LEFT JOIN ledger_balances b ON b.account_id = a.id WHERE a.kind = $1 AND a.owner_id IS NULL GROUP BY a.asset) \
+         SELECT COALESCE(h.asset, e.asset) AS asset, COALESCE(h.minor, 0) AS held, COALESCE(e.minor, 0) AS expected \
+         FROM held h FULL JOIN expected e ON e.asset = h.asset \
+         WHERE COALESCE(h.minor, 0) <> COALESCE(e.minor, 0)",
+    )
+    .bind(ESCROW_KIND)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| EscrowMismatch {
+            asset: r.get("asset"),
+            held_minor: r.get("held"),
+            expected_minor: r.get("expected"),
+        })
+        .collect())
 }

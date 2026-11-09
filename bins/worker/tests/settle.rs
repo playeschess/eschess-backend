@@ -98,3 +98,52 @@ async fn a_round_settles_scored_games_leaves_the_rest_and_can_run_again(pool: Pg
     assert_eq!((r.paid, r.waiting), (0, 1), "{r:?}");
     assert_eq!(balance(&pool, wallet).await.unwrap().minor, 1_400);
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_round_stops_and_says_so_when_escrow_does_not_match(pool: PgPool) {
+    let (game, winner) = finished_game(&pool).await;
+    sqlx::query(
+        "INSERT INTO fairplay_runs (game_id, scorer, outcome) VALUES ($1, 'baseline-1', 'scored')",
+    )
+    .bind(game)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 5 units appear in escrow that no game accounts for.
+    let escrow = system_account(
+        &pool,
+        eschess_storage::stakes::ESCROW_KIND,
+        &usdc(),
+        Side::Credit,
+    )
+    .await
+    .unwrap();
+    let wallet = user_wallet(&pool, winner, &usdc()).await.unwrap();
+    let amount = Amount::new(5, usdc()).unwrap();
+    post(
+        &pool,
+        &Posting::new(
+            IdempotencyKey::new("stray-test-posting").unwrap(),
+            "stake_hold",
+            None,
+            vec![
+                Entry::debit(wallet, amount.clone()),
+                Entry::credit(escrow, amount),
+            ],
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let r = tick(&pool, &config()).await.unwrap();
+    assert_eq!((r.escrow_mismatches, r.paid), (1, 0), "{r:?}");
+    let settled: bool =
+        sqlx::query_scalar("SELECT settled_at IS NOT NULL FROM games WHERE id = $1")
+            .bind(game)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!settled);
+}

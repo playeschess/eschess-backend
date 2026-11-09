@@ -120,6 +120,8 @@ pub struct GameView {
     /// What each player puts in, in minor units, and the asset; both `None` for an unstaked game.
     pub stake_minor: Option<i64>,
     pub stake_asset: Option<String>,
+    /// For a finished staked game: `settling` while its pot waits for fair play, `settled` once paid or returned.
+    pub settlement: Option<&'static str>,
     pub white: Option<Player>,
     pub black: Option<Player>,
     pub base_ms: i64,
@@ -187,6 +189,7 @@ struct GameRow {
     rated: bool,
     stake_minor: Option<i64>,
     stake_asset: Option<String>,
+    settled: bool,
     white_id: Option<Uuid>,
     black_id: Option<Uuid>,
     base_ms: i64,
@@ -204,7 +207,7 @@ struct GameRow {
     offer_ply: [Option<i32>; 2],
 }
 
-const COLS: &str = "id, created_by, color_preference, rated, stake_minor, stake_asset, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
+const COLS: &str = "id, created_by, color_preference, rated, stake_minor, stake_asset, settled_at IS NOT NULL AS settled, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
@@ -214,6 +217,7 @@ fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
         rated: r.get("rated"),
         stake_minor: r.get("stake_minor"),
         stake_asset: r.get("stake_asset"),
+        settled: r.get("settled"),
         white_id: r.get("white_id"),
         black_id: r.get("black_id"),
         base_ms: r.get("base_ms"),
@@ -427,6 +431,10 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
         rated: row.rated,
         stake_minor: row.stake_minor,
         stake_asset: row.stake_asset.clone(),
+        settlement: match (row.stake_minor, row.status.as_str()) {
+            (Some(_), "finished") => Some(if row.settled { "settled" } else { "settling" }),
+            _ => None,
+        },
         white: username(db, row.white_id).await?,
         black: username(db, row.black_id).await?,
         base_ms: row.base_ms,

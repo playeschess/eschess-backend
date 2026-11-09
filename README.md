@@ -328,7 +328,10 @@ case; if the scorer is not running, games stay unsettled rather than pay unrevie
 - a draw, or a game that ended before each side had made two moves, returns the stakes;
 - otherwise the winner gets the pot less `STAKE_FEE_BPS` (0 by default; at most 20%).
 
-The queue for staked games, a `settling` state in the game's JSON and the escrow reconciliation alarm are still to do.
+A finished staked game's JSON carries `stake.settlement`: `settling` while the pot waits for fair play, `settled` once
+paid or returned. Every settle round first checks that the escrow account equals the stakes of unsettled games (one for
+a waiting game, two for a started one); if not it logs an `ESCROW MISMATCH` error and **settles nothing** until a person
+looks. The queue for staked games is still to do.
 
 ## Trying it on the testnet
 
