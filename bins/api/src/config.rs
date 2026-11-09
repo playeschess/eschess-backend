@@ -32,6 +32,45 @@ pub struct Config {
     pub wallet_assets: Vec<AssetId>,
     /// Stellar deposits. `None` (the default) means the platform has no wallet on the network and deposits are off.
     pub stellar: Option<StellarConfig>,
+    /// The stakes offered for staked games, in minor units of USDC (ADR 0004 §1). Empty (the default) means staked games
+    /// are off. Needs Stellar, since the stake is USDC.
+    pub stakes_minor: Vec<i64>,
+}
+
+impl Config {
+    /// What staked games offer, or `None` while they are off.
+    pub fn stake_policy(&self) -> Option<eschess_storage::stakes::StakePolicy> {
+        let st = self.stellar.as_ref()?;
+        (!self.stakes_minor.is_empty()).then(|| eschess_storage::stakes::StakePolicy {
+            asset: st.usdc.clone(),
+            allowed_minor: self.stakes_minor.clone(),
+        })
+    }
+}
+
+fn stakes_from(
+    get: &dyn Fn(&str) -> Option<String>,
+    stellar: &Option<StellarConfig>,
+) -> Result<Vec<i64>, String> {
+    let Some(list) = get("STAKES_USDC").filter(|l| !l.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let Some(st) = stellar else {
+        return Err("STAKES_USDC needs Stellar to be configured (the stake is USDC)".into());
+    };
+    let mut out = Vec::new();
+    for part in list.split(',') {
+        let minor = Amount::from_decimal_str(part.trim(), st.usdc.clone())
+            .map_err(|e| format!("STAKES_USDC: {part:?} is not an amount ({e})"))?
+            .minor();
+        if minor <= 0 {
+            return Err("STAKES_USDC: every stake must be more than zero".into());
+        }
+        if !out.contains(&minor) {
+            out.push(minor);
+        }
+    }
+    Ok(out)
 }
 
 /// The platform's connection to the Stellar network.
@@ -138,6 +177,7 @@ impl Default for Config {
             email_cooldown_secs: 60,
             wallet_assets: vec![AssetId::native()],
             stellar: None,
+            stakes_minor: Vec::new(),
             ws_hello_timeout_ms: 5_000,
             ws_ping_interval_ms: 10_000,
             ws_pong_timeout_ms: 30_000,
@@ -236,6 +276,7 @@ impl Config {
             _ => d.wallet_assets.clone(),
         };
         let stellar = stellar_from(get)?;
+        let stakes_minor = stakes_from(get, &stellar)?;
         let mut wallet_assets = wallet_assets;
         // With Stellar on, new players get a USDC wallet too (unless the list was set explicitly).
         if let Some(st) = &stellar {
@@ -256,6 +297,7 @@ impl Config {
             email_cooldown_secs: var_from(get, "EMAIL_COOLDOWN_SECONDS", d.email_cooldown_secs),
             wallet_assets,
             stellar,
+            stakes_minor,
             ws_hello_timeout_ms: strict(get, "WS_HELLO_TIMEOUT_MS", d.ws_hello_timeout_ms)?,
             ws_ping_interval_ms: strict(get, "WS_PING_INTERVAL_MS", d.ws_ping_interval_ms)?,
             ws_pong_timeout_ms: strict(get, "WS_PONG_TIMEOUT_MS", d.ws_pong_timeout_ms)?,

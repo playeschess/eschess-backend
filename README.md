@@ -52,7 +52,8 @@ POST   /v1/auth/logout          end this session
 GET    /v1/auth/sessions        list your signed-in devices
 DELETE /v1/auth/sessions/{id}   sign one of your devices out
 GET    /v1/me                   your profile, wallet balances and ratings
-POST   /v1/games                open a game for someone to join (time control, colour, rated or casual)
+POST   /v1/games                open a game for someone to join (time control, colour, rated or casual; rated ones may carry a
+                                "stake": "5", held from your USDC wallet now and returned if you cancel; off unless STAKES_USDC is set)
 GET    /v1/games                the lobby (?scope=open), your games (?scope=mine), your past games (?scope=finished)
 GET    /v1/games/{id}           a game: position, moves, clock, and your legal moves when it is your turn
 POST   /v1/games/{id}/join      join an open game, which starts it
