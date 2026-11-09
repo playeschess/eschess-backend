@@ -58,3 +58,11 @@ again was refused with error 8 (`NotOpen`). So the "admin disappears" guarantee 
 - Trustline removal by a player (a payout that cannot be delivered becomes claimable, then `claim`).
 - A multisig admin.
 - Anything on mainnet. This contract has not been audited.
+
+## Through our own code
+
+`crates/stellar/tests/escrow_testnet.rs` runs a match against this contract using the backend's Soroban client instead of
+the command-line tool (2026-11-09, about 70 seconds): it read the admin, created a match, saw that settling before the
+deposits was refused at the simulation stage with `NotFunded`, took both deposits, settled `WinA`, read the match back as
+`Settled`, and saw a second settle refused with `NotOpen`. It is ignored by default; the file header says how to run it.
+Use the first `admin` key of the contract (it changed hands in the handover test above).

@@ -60,7 +60,7 @@ Note: our account does not have write access to the `eschess-contracts` repo, so
 
 ### Step 2. Teach our backend to talk to the contract
 
-Status: not started
+Status: **mostly done on 2026-11-09** (the client is built and proven on the testnet; keeping the admin key safe for real money is still open, see step 7)
 
 Today our Stellar code can only send plain payments. It needs to:
 1. Call the contract (simulate first, then sign and submit, as the contract's runbook requires).
@@ -68,6 +68,8 @@ Today our Stellar code can only send plain payments. It needs to:
 3. Keep the admin key safe (testnet: a key file; real money: a proper key service).
 
 Done when: a test in our repo creates and settles a match on the testnet through our code, not by hand.
+
+Result: `crates/stellar/src/soroban.rs` (simulate, sign, send, wait; never signs a call the network says would fail) and `escrow.rs` (the contract's calls and reading a match back). The live test `crates/stellar/tests/escrow_testnet.rs` created, funded and settled a match through them. What is left of step 2 is not code: a proper key service for the admin key before real money.
 
 ### Step 3. A wallet for every user
 
