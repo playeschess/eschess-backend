@@ -313,6 +313,15 @@ repository has the plumbing, and a scorer that gives everyone 0.
 - The database refuses scores for non-players, changed or deleted scores, a second open case, reopening a decided case,
   adding a game to it, and deciding a case about yourself.
 
+## The escrow contract from the backend (crates/stellar)
+
+`crates/stellar` can call the escrow contract in `eschess-contracts` (`soroban.rs`, `escrow.rs`): it builds the call,
+asks the network to simulate it, refuses to sign one that would fail, signs it, sends it, and waits for the result. Reading
+a match back needs no key. `tests/escrow_testnet.rs` plays a whole match on the testnet through this code (it is ignored
+by default; its header says how to run it). Nothing in the game server uses the contract yet: staked games still hold
+stakes in the database ledger (see `plan.md` for the steps that move them onto the contract). The deployed testnet
+contract and what was tried on it are in `docs/escrow-testnet.md`.
+
 ## Staked games (crates/storage, bins/worker) — testnet only
 
 A rated game can carry a stake from the list in `STAKES_USDC`. The creator's stake is held (wallet to a `stake_escrow`

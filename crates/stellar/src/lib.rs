@@ -12,8 +12,10 @@
 //! is what lets that change without touching the rest of the platform.
 
 pub mod deposit;
+pub mod escrow;
 pub mod horizon;
 pub mod signer;
+pub mod soroban;
 pub mod tx;
 
 use std::fmt;

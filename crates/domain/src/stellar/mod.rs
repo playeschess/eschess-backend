@@ -5,14 +5,15 @@
 //! eSchess gives each player a muxed address over the platform's single hot wallet, so an incoming payment says which
 //! player it is for without a memo (a memo-less transfer from an exchange cannot be mis-credited).
 //!
-//! Only `G` and `M` addresses are accepted here. Other kinds (`P` signed payloads, `C` contracts, ...) are refused
-//! rather than half-understood.
+//! [`Address`] accepts only `G` and `M` addresses: other kinds (`P` signed payloads, ...) are refused rather than
+//! half-understood. A smart contract (`C...`) is a separate type, [`ContractId`], used only for the escrow.
 
 use std::fmt;
 
 const VERSION_ACCOUNT: u8 = 6 << 3; // 'G'
 const VERSION_MUXED: u8 = 12 << 3; // 'M'
 const VERSION_SEED: u8 = 18 << 3; // 'S'
+const VERSION_CONTRACT: u8 = 2 << 3; // 'C'
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressError {
@@ -56,6 +57,36 @@ pub struct MuxedAccount {
 pub enum Address {
     Account(AccountKey),
     Muxed(MuxedAccount),
+}
+
+/// A smart contract's address (`C...`): the 32-byte contract id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContractId(pub [u8; 32]);
+
+impl ContractId {
+    /// Reads a `C...` address, verifying the checksum and that it is written canonically.
+    pub fn parse(s: &str) -> Result<ContractId, AddressError> {
+        let bytes = base32_decode(s).ok_or(AddressError::Malformed)?;
+        if bytes.len() != 35 {
+            return Err(AddressError::Malformed);
+        }
+        let (body, check) = bytes.split_at(33);
+        if crc16_xmodem(body) != u16::from_le_bytes([check[0], check[1]]) {
+            return Err(AddressError::BadChecksum);
+        }
+        if encode(body[0], &body[1..]) != s {
+            return Err(AddressError::Malformed);
+        }
+        if body[0] != VERSION_CONTRACT {
+            return Err(AddressError::UnsupportedKind);
+        }
+        Ok(ContractId(body[1..33].try_into().unwrap()))
+    }
+
+    /// The `C...` form.
+    pub fn to_c(&self) -> String {
+        encode(VERSION_CONTRACT, &self.0)
+    }
 }
 
 impl AccountKey {
@@ -274,6 +305,23 @@ mod tests {
         let addr = Address::parse(M_BIG).unwrap();
         assert_eq!((addr.account(), addr.mux_id()), (key, Some(1 << 63)));
         assert_eq!(Address::parse(G).unwrap().mux_id(), None);
+    }
+
+    #[test]
+    fn a_contract_address_round_trips_and_is_not_an_account() {
+        // The escrow deployed on the testnet on 2026-11-09.
+        let c = "CAJLKHWOKJPUBLRG6GNZZQXYWSCFZE3VLMAVUOEDI3MC7GV4GVVUN6BT";
+        let id = ContractId::parse(c).unwrap();
+        assert_eq!(id.to_c(), c);
+        assert_eq!(
+            ContractId::parse(G),
+            Err(AddressError::UnsupportedKind),
+            "a G address is not a contract"
+        );
+        assert_eq!(Address::parse(c), Err(AddressError::UnsupportedKind));
+        let typo = format!("{}X", &c[..c.len() - 1]);
+        assert!(ContractId::parse(&typo).is_err());
+        assert!(ContractId::parse("C").is_err());
     }
 
     #[test]
