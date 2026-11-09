@@ -39,7 +39,7 @@ pub(crate) fn game_json(g: &GameView) -> Value {
         "id": g.id, "status": g.status, "created_by": g.created_by,
         "white": player_json(&g.white), "black": player_json(&g.black),
         "time_control": { "base_ms": g.base_ms, "increment_ms": g.increment_ms, "category": category.ok() },
-        "rated": g.rated, "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
+        "rated": g.rated, "stake": g.stake_minor.map(|m| json!({ "minor": m, "asset": g.stake_asset })), "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
         "clock": { "white_ms": g.white_ms, "black_ms": g.black_ms, "as_of_ms": g.as_of_ms },
         "result": g.result, "end_reason": g.end_reason, "draw_offer": g.draw_offer, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
     })
@@ -72,6 +72,9 @@ pub struct CreateBody {
     color: Option<String>,
     /// Whether the game counts for ratings (the default) or is casual.
     rated: Option<bool>,
+    /// What each player puts on the game, in USDC (a decimal string such as `"5"`). Only certain amounts are offered, only
+    /// rated games can be staked, and the stake is held from the wallet when the game is created.
+    stake: Option<String>,
 }
 
 /// Opens a game for another player to join.
@@ -96,6 +99,22 @@ pub async fn create(
         .increment_seconds
         .checked_mul(1_000)
         .ok_or_else(|| ApiError::Validation("that increment is too large".into()))?;
+    let stake = match b.stake.as_deref() {
+        None => None,
+        Some(text) => {
+            let policy = state
+                .config
+                .stake_policy()
+                .ok_or_else(|| ApiError::Validation("staked games are not offered".into()))?;
+            let minor =
+                eschess_domain::money::Amount::from_decimal_str(text.trim(), policy.asset.clone())
+                    .map_err(|_| ApiError::Validation("stake is not an amount".into()))?
+                    .minor();
+            Some(policy.stake(minor).ok_or_else(|| {
+                ApiError::Validation("that stake is not one of the amounts offered".into())
+            })?)
+        }
+    };
     let id = games::create_game(
         &state.pool,
         user.user_id,
@@ -103,6 +122,7 @@ pub async fn create(
         increment_ms,
         color,
         b.rated.unwrap_or(true),
+        stake.as_ref(),
     )
     .await?;
     Ok((

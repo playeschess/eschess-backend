@@ -153,6 +153,23 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "that client_move_id was already used for a different move",
             ),
             InvalidTimeControl(why) => ApiError::Validation(why.to_string()),
+            EmailNotConfirmed => ApiError::Coded(
+                StatusCode::FORBIDDEN,
+                "email_not_confirmed",
+                "confirm your email before staking money".into(),
+            ),
+            StakingRestricted => ApiError::Coded(
+                StatusCode::FORBIDDEN,
+                "staking_restricted",
+                "you cannot stake money right now".into(),
+            ),
+            InsufficientFunds => ApiError::Coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "insufficient_funds",
+                "your balance does not cover that stake".into(),
+            ),
+            StakeNotOffered(why) => ApiError::Validation(why.to_string()),
+            Ledger(e) => ApiError::internal(e),
             Refused(Refusal::NotAPlayer) => ApiError::NotFound,
             Refused(Refusal::NotYourTurn) => conflict("not_your_turn", "it is not your turn"),
             Refused(Refusal::GameOver) => conflict("game_over", "the game is over"),

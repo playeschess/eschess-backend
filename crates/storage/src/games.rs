@@ -14,6 +14,7 @@ use eschess_game::{
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::ratings;
+use crate::stakes::{self, Stake};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -37,6 +38,16 @@ pub enum GameError {
     /// The rules said no (illegal move, not your turn, game over ...).
     Refused(Refusal),
     InvalidTimeControl(&'static str),
+    /// A staked game needs a confirmed email (ADR 0004 §2).
+    EmailNotConfirmed,
+    /// A player with an open fair-play case, a suspension or a closure cannot stake (ADR 0004 §2).
+    StakingRestricted,
+    /// The wallet cannot cover the stake.
+    InsufficientFunds,
+    /// Staked games are not offered, or not at that amount, or not for that kind of game.
+    StakeNotOffered(&'static str),
+    /// The ledger refused a posting for a reason that is not the player's (a bug or a broken invariant).
+    Ledger(String),
     Database(sqlx::Error),
 }
 
@@ -62,6 +73,11 @@ impl fmt::Display for GameError {
             ),
             GameError::Refused(r) => write!(f, "{r}"),
             GameError::InvalidTimeControl(why) => write!(f, "{why}"),
+            GameError::EmailNotConfirmed => write!(f, "confirm your email before staking money"),
+            GameError::StakingRestricted => write!(f, "you cannot stake money right now"),
+            GameError::InsufficientFunds => write!(f, "your balance does not cover that stake"),
+            GameError::StakeNotOffered(why) => write!(f, "{why}"),
+            GameError::Ledger(e) => write!(f, "ledger error: {e}"),
             GameError::Database(e) => write!(f, "database error: {e}"),
         }
     }
@@ -101,6 +117,9 @@ pub struct GameView {
     pub color_preference: String,
     /// Whether the result counts for ratings. Fixed when the game is opened.
     pub rated: bool,
+    /// What each player puts in, in minor units, and the asset; both `None` for an unstaked game.
+    pub stake_minor: Option<i64>,
+    pub stake_asset: Option<String>,
     pub white: Option<Player>,
     pub black: Option<Player>,
     pub base_ms: i64,
@@ -166,6 +185,8 @@ struct GameRow {
     created_by: Uuid,
     color_preference: String,
     rated: bool,
+    stake_minor: Option<i64>,
+    stake_asset: Option<String>,
     white_id: Option<Uuid>,
     black_id: Option<Uuid>,
     base_ms: i64,
@@ -183,7 +204,7 @@ struct GameRow {
     offer_ply: [Option<i32>; 2],
 }
 
-const COLS: &str = "id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
+const COLS: &str = "id, created_by, color_preference, rated, stake_minor, stake_asset, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
@@ -191,6 +212,8 @@ fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
         created_by: r.get("created_by"),
         color_preference: r.get("color_preference"),
         rated: r.get("rated"),
+        stake_minor: r.get("stake_minor"),
+        stake_asset: r.get("stake_asset"),
         white_id: r.get("white_id"),
         black_id: r.get("black_id"),
         base_ms: r.get("base_ms"),
@@ -402,6 +425,8 @@ async fn view(db: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView>
         created_by: row.created_by,
         color_preference: row.color_preference.clone(),
         rated: row.rated,
+        stake_minor: row.stake_minor,
+        stake_asset: row.stake_asset.clone(),
         white: username(db, row.white_id).await?,
         black: username(db, row.black_id).await?,
         base_ms: row.base_ms,
@@ -429,8 +454,12 @@ pub async fn create_game(
     increment_ms: u64,
     color_preference: &str,
     rated: bool,
+    stake: Option<&Stake>,
 ) -> Result<Uuid> {
     let control = TimeControl::new(base_ms, increment_ms).map_err(|_| GameError::InvalidTimeControl("the base time must be between 1 second and 3 hours and the increment at most 3 minutes"))?;
+    if stake.is_some() && !rated {
+        return Err(GameError::StakeNotOffered("only rated games can be staked"));
+    }
     let id = Uuid::now_v7();
     let clock = Clock::start(control, LagPolicy::default(), 0).state();
     let mut tx = pool.begin().await?;
@@ -454,8 +483,8 @@ pub async fn create_game(
         return Err(GameError::TooManyOpenGames);
     }
     sqlx::query(
-        "INSERT INTO games (id, created_by, color_preference, rated, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms)
-         VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)",
+        "INSERT INTO games (id, created_by, color_preference, rated, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, stake_minor, stake_asset)
+         VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10,$12,$13)",
     )
     .bind(id)
     .bind(creator)
@@ -468,8 +497,14 @@ pub async fn create_game(
     .bind(clock.lag_quota_ms[0] as i64)
     .bind(clock.lag_quota_ms[1] as i64)
     .bind(rated)
+    .bind(stake.map(|s| s.minor))
+    .bind(stake.map(|s| s.asset.to_string()))
     .execute(&mut *tx)
     .await?;
+    // The creator's stake is held in the same transaction, so a game never exists without its first stake.
+    if let Some(stake) = stake {
+        stakes::hold(&mut tx, id, creator, stake).await?;
+    }
     tx.commit().await?;
     Ok(id)
 }
@@ -550,6 +585,11 @@ pub async fn join_game(
             return Err(GameError::Suspended(until));
         }
     }
+    // The joiner's stake is held in the transaction that starts the game: a game never starts with one stake in. If it
+    // cannot be held the join fails and nothing moves.
+    if let Some(stake) = stakes::stake_of(row.stake_minor, row.stake_asset.as_deref())? {
+        stakes::hold(&mut tx, id, joiner, &stake).await?;
+    }
     let creator_white = match row.color_preference.as_str() {
         "white" => true,
         "black" => false,
@@ -599,6 +639,9 @@ pub async fn cancel_game(pool: &PgPool, id: Uuid, creator: Uuid) -> Result<()> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    if let Some(stake) = stakes::stake_of(row.stake_minor, row.stake_asset.as_deref())? {
+        stakes::release(&mut tx, id, creator, &stake).await?;
+    }
     notify(&mut tx, id).await?;
     tx.commit().await?;
     Ok(())
