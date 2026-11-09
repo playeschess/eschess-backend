@@ -25,6 +25,9 @@ pub struct AppState {
     pub hub: hub::Hub,
     /// The Stellar network, when the platform has a wallet on it (`config.stellar`). Withdrawals look destinations up here.
     pub chain: Option<Arc<dyn eschess_stellar::Chain>>,
+    /// Seals and opens users' wallet keys (ADR 0006). `None` while no master key is configured: players then have no
+    /// wallet of their own yet, and nothing else is affected.
+    pub vault: Option<Arc<dyn eschess_stellar::custody::KeyVault>>,
 }
 
 /// The API's routes. Kept separate from `main` so tests can call it without opening a network port.
@@ -170,6 +173,7 @@ mod tests {
             }),
             hub: hub::Hub::new(),
             chain: None,
+            vault: None,
         }
     }
 

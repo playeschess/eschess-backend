@@ -91,6 +91,16 @@ pub async fn signup(
     )
     .await?;
 
+    // Their own wallet address (ADR 0006), made now because it costs nothing. If it cannot be made, signing up still
+    // works and the wallet is made the first time it is needed.
+    if let Some(vault) = &state.vault {
+        if let Err(e) =
+            eschess_storage::wallets::ensure_wallet(&state.pool, &**vault, user.id).await
+        {
+            tracing::warn!(user = %user.id, "could not create the player's wallet at signup: {e}");
+        }
+    }
+
     // Ask them to confirm their address. The first email is always allowed; this also starts the resend cooldown.
     identity::allow_email(
         &state.pool,

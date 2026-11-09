@@ -35,6 +35,9 @@ pub struct Config {
     /// The stakes offered for staked games, in minor units of USDC (ADR 0004 §1). Empty (the default) means staked games
     /// are off. Needs Stellar, since the stake is USDC.
     pub stakes_minor: Vec<i64>,
+    /// A file holding the master key that seals users' wallet keys (testnet only; see ADR 0006). `None` (the default)
+    /// means players get no wallet of their own.
+    pub wallet_master_key_file: Option<String>,
 }
 
 impl Config {
@@ -178,6 +181,7 @@ impl Default for Config {
             wallet_assets: vec![AssetId::native()],
             stellar: None,
             stakes_minor: Vec::new(),
+            wallet_master_key_file: None,
             ws_hello_timeout_ms: 5_000,
             ws_ping_interval_ms: 10_000,
             ws_pong_timeout_ms: 30_000,
@@ -298,6 +302,9 @@ impl Config {
             wallet_assets,
             stellar,
             stakes_minor,
+            wallet_master_key_file: get("WALLET_MASTER_KEY_FILE")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             ws_hello_timeout_ms: strict(get, "WS_HELLO_TIMEOUT_MS", d.ws_hello_timeout_ms)?,
             ws_ping_interval_ms: strict(get, "WS_PING_INTERVAL_MS", d.ws_ping_interval_ms)?,
             ws_pong_timeout_ms: strict(get, "WS_PONG_TIMEOUT_MS", d.ws_pong_timeout_ms)?,

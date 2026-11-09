@@ -21,3 +21,4 @@ uuid.workspace = true
 sqlx.workspace = true
 proptest.workspace = true
 futures.workspace = true
+ed25519-dalek.workspace = true

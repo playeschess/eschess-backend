@@ -8,6 +8,7 @@ pub mod matchmaking;
 pub mod ratings;
 pub mod stakes;
 pub mod stellar;
+pub mod wallets;
 pub mod withdrawals;
 
 use sqlx::postgres::PgPoolOptions;
