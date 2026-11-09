@@ -168,10 +168,6 @@ fn queue_body(stake: Option<&str>) -> Value {
     b
 }
 
-async fn state(api: &Api, token: &str) -> Value {
-    api.get("/v1/matchmaking", token).await.1["status"].clone()
-}
-
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
 async fn two_players_asking_for_the_same_stake_are_paired_and_both_stakes_held(pool: PgPool) {
