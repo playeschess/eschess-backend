@@ -359,3 +359,10 @@ First run (2026-11-06): 5 USDC sent to a player's `M...` address with no memo wa
 after it landed (tx `d936f27e…`); a 3 USDC withdrawal with a text memo was signed, recorded, sent and confirmed about 5
 seconds after it was asked for (tx `1dd957a7…`, `max_time` two minutes after it was built). Afterwards the hot wallet held
 2 USDC on chain, and the ledger agreed: custody 2, the player 2, pending 0, nothing in review.
+
+Staked play, end to end (2026-11-09): `scripts/try-staked.py` (run with the testnet venv, against a fresh database, the API with
+`STAKES_USDC` set, the public worker with `SETTLE_SCORER=baseline-1` and the private `fairplay-worker`) signs up two
+players, sends each 3 real testnet USDC, and plays staked games by create-and-join and through the queue. Three games ran
+this way: each was scored by `baseline-1` before its pot moved, each settled exactly once (checkmate winner paid the pot,
+a game resigned before any move returned both stakes), the escrow ended at 0 and the players' balances summed to the 6 USDC
+deposited. The queue-paired game came from the background sweep. Run it only on the testnet.
