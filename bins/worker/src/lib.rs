@@ -6,5 +6,6 @@
 
 pub mod fairplay;
 pub mod sender;
+pub mod settle;
 
 pub use sender::{SenderConfig, TickReport};

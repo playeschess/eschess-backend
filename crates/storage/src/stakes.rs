@@ -9,7 +9,7 @@
 
 use eschess_domain::money::{Amount, AssetId};
 use eschess_ledger::{AccountId, Entry, IdempotencyKey, Posting, Side};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::games::GameError;
@@ -81,7 +81,7 @@ pub async fn require_can_stake(tx: &mut PgConnection, player: Uuid) -> Result<()
     Ok(())
 }
 
-async fn account(
+pub(crate) async fn account(
     tx: &mut PgConnection,
     kind: &str,
     asset: &AssetId,
@@ -177,4 +177,202 @@ pub fn stake_of(minor: Option<i64>, asset: Option<&str>) -> Result<Option<Stake>
         })),
         _ => Err(GameError::Ledger("a game has half a stake".into())),
     }
+}
+
+/// The ledger account for the platform's fee on staked games (revenue; credit-normal).
+pub const FEE_KIND: &str = "stake_fees";
+
+/// Most the platform may take from a pot, in basis points (20%). A configuration typo cannot take more than this.
+pub const MAX_FEE_BPS: u32 = 2_000;
+
+/// What settling a game did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// The winner received the pot (less the fee, if any).
+    Paid { winner: Uuid, fee_minor: i64 },
+    /// Each player got their own stake back: a draw, a game that was never really played, or both players confirmed.
+    Returned,
+    /// Pot confiscated from a confirmed cheater and paid to the opponent in full (ADR 0004 §5, OD-14).
+    Confiscated { to: Uuid },
+}
+
+/// Why a game was not settled this time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Waiting {
+    /// The fair-play scorer has not finished with the game.
+    NotScored,
+    /// A player has an open fair-play case.
+    OpenCase,
+    /// Not a finished, staked, unsettled game (already settled by someone else, say).
+    NothingToDo,
+}
+
+/// Finished staked games that have not been settled, oldest first.
+pub async fn unsettled(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT id FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL AND status = 'finished' \
+         ORDER BY ended_at, id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Settles one finished staked game exactly once (ADR 0004 §5): one ledger posting and `settled_at`, in one
+/// transaction, with the game locked so two workers cannot both do it (and the posting's key refuses a repeat anyway).
+///
+/// Waits ([`Waiting`]) until `scorer` has finished with the game and neither player has an open case. Then:
+/// a case confirmed against exactly one player pays the other the whole pot; both confirmed returns both stakes; else
+/// a draw, or a game that ended before each side had made two moves, returns the stakes; else the winner takes the pot
+/// less `fee_bps` of it.
+pub async fn settle(
+    pool: &PgPool,
+    game: Uuid,
+    scorer: &str,
+    fee_bps: u32,
+) -> Result<Result<Settled, Waiting>, GameError> {
+    let fee_bps = fee_bps.min(MAX_FEE_BPS) as i64;
+    let mut tx = pool.begin().await?;
+    let Some(g) = sqlx::query(
+        "SELECT white_id, black_id, result, ply, stake_minor, stake_asset FROM games \
+         WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL FOR UPDATE",
+    )
+    .bind(game)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(Err(Waiting::NothingToDo));
+    };
+    let (white, black): (Uuid, Uuid) = (g.get("white_id"), g.get("black_id"));
+    let result: String = g.get("result");
+    let ply: i32 = g.get("ply");
+    let Some(stake) = stake_of(
+        g.get("stake_minor"),
+        g.get::<Option<String>, _>("stake_asset").as_deref(),
+    )?
+    else {
+        return Ok(Err(Waiting::NothingToDo));
+    };
+
+    let scored: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fairplay_runs WHERE game_id = $1 AND scorer = $2)",
+    )
+    .bind(game)
+    .bind(scorer)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !scored {
+        return Ok(Err(Waiting::NotScored));
+    }
+    let open_case: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fairplay_cases WHERE player_id IN ($1, $2) AND status = 'open')",
+    )
+    .bind(white)
+    .bind(black)
+    .fetch_one(&mut *tx)
+    .await?;
+    if open_case {
+        return Ok(Err(Waiting::OpenCase));
+    }
+    let confirmed = |player: Uuid| {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM fairplay_case_games cg JOIN fairplay_cases c ON c.id = cg.case_id \
+             WHERE cg.game_id = $1 AND c.player_id = $2 AND c.status = 'confirmed')",
+        )
+        .bind(game)
+        .bind(player)
+    };
+    let white_cheated = confirmed(white).fetch_one(&mut *tx).await?;
+    let black_cheated = confirmed(black).fetch_one(&mut *tx).await?;
+
+    let pot = stake
+        .minor
+        .checked_mul(2)
+        .ok_or_else(|| GameError::Ledger("pot overflow".into()))?;
+    let escrow = account(&mut tx, ESCROW_KIND, &stake.asset, None, Side::Credit).await?;
+    let amount = |minor: i64| {
+        Amount::new(minor, stake.asset.clone()).map_err(|e| GameError::Ledger(e.to_string()))
+    };
+    let mut entries = vec![Entry::debit(escrow, amount(pot)?)];
+    let settled;
+    let credit = |entries: &mut Vec<Entry>, acct: AccountId, minor: i64| -> Result<(), GameError> {
+        if minor > 0 {
+            entries.push(Entry::credit(acct, amount(minor)?));
+        }
+        Ok(())
+    };
+    let wallet_w = account(
+        &mut tx,
+        "user_wallet",
+        &stake.asset,
+        Some(white),
+        Side::Credit,
+    )
+    .await?;
+    let wallet_b = account(
+        &mut tx,
+        "user_wallet",
+        &stake.asset,
+        Some(black),
+        Side::Credit,
+    )
+    .await?;
+    match (white_cheated, black_cheated) {
+        (true, true) => {
+            credit(&mut entries, wallet_w, stake.minor)?;
+            credit(&mut entries, wallet_b, stake.minor)?;
+            settled = Settled::Returned;
+        }
+        (true, false) => {
+            credit(&mut entries, wallet_b, pot)?;
+            settled = Settled::Confiscated { to: black };
+        }
+        (false, true) => {
+            credit(&mut entries, wallet_w, pot)?;
+            settled = Settled::Confiscated { to: white };
+        }
+        (false, false) => {
+            let winner = match result.as_str() {
+                "white" => Some((white, wallet_w)),
+                "black" => Some((black, wallet_b)),
+                _ => None,
+            };
+            match winner {
+                Some((who, wallet)) if ply >= crate::ratings::MIN_PLIES_FOR_RATING => {
+                    let fee = pot * fee_bps / 10_000;
+                    credit(&mut entries, wallet, pot - fee)?;
+                    if fee > 0 {
+                        let fees =
+                            account(&mut tx, FEE_KIND, &stake.asset, None, Side::Credit).await?;
+                        credit(&mut entries, fees, fee)?;
+                    }
+                    settled = Settled::Paid {
+                        winner: who,
+                        fee_minor: fee,
+                    };
+                }
+                _ => {
+                    credit(&mut entries, wallet_w, stake.minor)?;
+                    credit(&mut entries, wallet_b, stake.minor)?;
+                    settled = Settled::Returned;
+                }
+            }
+        }
+    }
+    let key = IdempotencyKey::new(&format!("stake:{game}:settle"))
+        .map_err(|e| GameError::Ledger(e.to_string()))?;
+    let game_ref = game.to_string();
+    let posting = Posting::new(key, "stake_settle", Some(("game", &game_ref)), entries)
+        .map_err(|e| GameError::Ledger(e.to_string()))?;
+    ledger::post_in(&mut tx, &posting)
+        .await
+        .map_err(ledger_err)?;
+    sqlx::query("UPDATE games SET settled_at = now() WHERE id = $1")
+        .bind(game)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|e| ledger_err(LedgerStoreError::from(e)))?;
+    Ok(Ok(settled))
 }

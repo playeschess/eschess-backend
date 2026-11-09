@@ -53,7 +53,7 @@ GET    /v1/auth/sessions        list your signed-in devices
 DELETE /v1/auth/sessions/{id}   sign one of your devices out
 GET    /v1/me                   your profile, wallet balances and ratings
 POST   /v1/games                open a game for someone to join (time control, colour, rated or casual; rated ones may carry a
-                                "stake": "5", held from your USDC wallet now and returned if you cancel; off unless STAKES_USDC is set)
+                                "stake": "5", held from your USDC wallet now and returned if you cancel; off unless STAKES_USDC is set; the pot is paid by the worker's settle job, see below)
 GET    /v1/games                the lobby (?scope=open), your games (?scope=mine), your past games (?scope=finished)
 GET    /v1/games/{id}           a game: position, moves, clock, and your legal moves when it is your turn
 POST   /v1/games/{id}/join      join an open game, which starts it
@@ -312,6 +312,23 @@ repository has the plumbing, and a scorer that gives everyone 0.
     (`409 case_changed`) until they look again: nobody clears evidence they never saw.
 - The database refuses scores for non-players, changed or deleted scores, a second open case, reopening a decided case,
   adding a game to it, and deciding a case about yourself.
+
+## Staked games (crates/storage, bins/worker) — testnet only
+
+A rated game can carry a stake from the list in `STAKES_USDC`. The creator's stake is held (wallet to a `stake_escrow`
+ledger account) when the game opens and the joiner's when it starts; cancelling a waiting game returns the creator's. A
+player with an open fair-play case, a suspension or a closure cannot stake.
+
+The worker's **settle job** pays the pot, once, per finished staked game. It runs only if `SETTLE_SCORER` names the
+fair-play scorer to wait for, and it waits until that scorer has looked at the game and neither player has an open
+case; if the scorer is not running, games stay unsettled rather than pay unreviewed. Then:
+
+- a case **confirmed** against one player pays the other the whole pot, whatever the result; against both, each gets
+  their stake back;
+- a draw, or a game that ended before each side had made two moves, returns the stakes;
+- otherwise the winner gets the pot less `STAKE_FEE_BPS` (0 by default; at most 20%).
+
+The queue for staked games, a `settling` state in the game's JSON and the escrow reconciliation alarm are still to do.
 
 ## Trying it on the testnet
 

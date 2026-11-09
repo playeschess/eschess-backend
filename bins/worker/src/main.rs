@@ -27,6 +27,7 @@ async fn main() {
     // Fair play runs whatever else is configured. This repository has only the scorer that scores everything 0; the
     // private eschess-fairplay repository builds a worker with the real one.
     spawn_fairplay(pool.clone());
+    spawn_settle(pool.clone());
 
     let Some(stellar) = config.stellar.clone() else {
         tracing::info!(
@@ -92,6 +93,47 @@ async fn main() {
         }
     }
     shutdown().await;
+}
+
+/// Settling staked games is off unless SETTLE_SCORER names the fair-play scorer to wait for (see `settle`).
+fn spawn_settle(pool: sqlx::PgPool) {
+    let get = |name: &str| std::env::var(name).ok();
+    let Some(config) = eschess_worker::settle::SettleConfig::from_lookup(&get)
+        .expect("invalid settlement settings")
+    else {
+        tracing::info!(
+            "SETTLE_SCORER is not set: finished staked games will not be settled by this worker"
+        );
+        return;
+    };
+    let poll = Duration::from_millis(
+        get("SETTLE_POLL_MS")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(5_000u64)
+            .max(1_000),
+    );
+    tracing::info!(
+        "settling staked games once {} has looked at them (fee {} bps)",
+        config.scorer,
+        config.fee_bps
+    );
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::settle::tick(&pool, &config).await {
+                Ok(r) if r.paid + r.returned + r.confiscated + r.failed > 0 => tracing::info!(
+                    "settle: {} paid, {} returned, {} confiscated, {} waiting, {} failed",
+                    r.paid,
+                    r.returned,
+                    r.confiscated,
+                    r.waiting,
+                    r.failed
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("settle round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(poll).await;
+        }
+    });
 }
 
 fn spawn_fairplay(pool: sqlx::PgPool) {
