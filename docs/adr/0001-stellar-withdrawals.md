@@ -167,8 +167,9 @@ workers at once (advisory locks + idempotency keys).
 
 - Production signing: KMS/HSM choice, m-of-n multisig on the treasury, hot/cold wallet split and sweep policy.
 - Who pays network fees, and whether players pay a withdrawal fee (OD-16).
-- Payout hold window before sending (OD-13). The status machine has room for it: a delay between `approved` and
-  `submitting`.
+- Payout hold window before sending (OD-13). **Decided by the owner, 2026-11-09: none.** Withdrawals are sent as soon as
+  they are approved. The fair-play hold (ADR 0003 §2) still applies: a player with an open case waits. The status machine
+  still has room for a delay if that is ever changed.
 - Final threshold and limit numbers.
 
 ## Build order

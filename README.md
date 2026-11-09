@@ -319,6 +319,9 @@ A rated game can carry a stake from the list in `STAKES_USDC`. The creator's sta
 ledger account) when the game opens and the joiner's when it starts; cancelling a waiting game returns the creator's. A
 player with an open fair-play case, a suspension or a closure cannot stake.
 
+A staked game nobody joins is cancelled by the worker after 10 minutes (`STAKED_GAME_WAIT_SECS`, 60 to 86400) and the
+creator's stake returned; unstaked games do not expire.
+
 The worker's **settle job** pays the pot, once, per finished staked game. It runs only if `SETTLE_SCORER` names the
 fair-play scorer to wait for, and it waits until that scorer has looked at the game and neither player has an open
 case; if the scorer is not running, games stay unsettled rather than pay unreviewed. Then:
