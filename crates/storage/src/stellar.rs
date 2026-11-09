@@ -111,7 +111,7 @@ pub async fn system_account(
         .execute(pool)
         .await?;
     let id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM ledger_accounts WHERE owner_id IS NULL AND kind = $1 AND asset = $2",
+        "SELECT id FROM ledger_accounts WHERE owner_id IS NULL AND kind = $1 AND asset = $2 ORDER BY id LIMIT 1",
     )
     .bind(kind)
     .bind(asset.to_string())

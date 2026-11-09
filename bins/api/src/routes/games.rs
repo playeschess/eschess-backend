@@ -39,7 +39,7 @@ pub(crate) fn game_json(g: &GameView) -> Value {
         "id": g.id, "status": g.status, "created_by": g.created_by,
         "white": player_json(&g.white), "black": player_json(&g.black),
         "time_control": { "base_ms": g.base_ms, "increment_ms": g.increment_ms, "category": category.ok() },
-        "rated": g.rated, "stake": g.stake_minor.map(|m| json!({ "minor": m, "asset": g.stake_asset })), "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
+        "rated": g.rated, "stake": g.stake_minor.map(|m| json!({ "minor": m, "asset": g.stake_asset, "settlement": g.settlement })), "fen": g.fen, "ply": g.ply, "moves": g.moves, "turn": g.turn,
         "clock": { "white_ms": g.white_ms, "black_ms": g.black_ms, "as_of_ms": g.as_of_ms },
         "result": g.result, "end_reason": g.end_reason, "draw_offer": g.draw_offer, "legal_moves": g.legal_moves, "event_seq": g.event_seq,
     })

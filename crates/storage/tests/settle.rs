@@ -315,3 +315,123 @@ async fn two_workers_at_once_pay_the_pot_once(pool: PgPool) {
     assert_eq!(wallet(&pool, w).await, 1_400);
     assert_eq!(escrow(&pool).await, 0);
 }
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn escrow_always_matches_unsettled_stakes_and_a_difference_is_seen(pool: PgPool) {
+    assert!(stakes::escrow_mismatches(&pool).await.unwrap().is_empty());
+    let (game, w, _b) = started(&pool).await;
+    let m = stakes::escrow_mismatches(&pool).await.unwrap();
+    assert!(m.is_empty(), "held for a started game: {m:?}");
+    finish(&pool, game, "white", 40).await;
+    scored(&pool, game, &[]).await;
+    assert!(
+        stakes::escrow_mismatches(&pool).await.unwrap().is_empty(),
+        "held until settled"
+    );
+    settle(&pool, game).await.unwrap();
+    assert!(
+        stakes::escrow_mismatches(&pool).await.unwrap().is_empty(),
+        "empty after settlement"
+    );
+
+    // Money appearing in escrow that no game accounts for is reported, with both numbers.
+    let escrow_acct = system_account(&pool, ESCROW_KIND, &usdc(), Side::Credit)
+        .await
+        .unwrap();
+    let wallet = user_wallet(&pool, w, &usdc()).await.unwrap();
+    let amount = Amount::new(7, usdc()).unwrap();
+    post(
+        &pool,
+        &Posting::new(
+            IdempotencyKey::new("stray-test-posting").unwrap(),
+            "stake_hold",
+            None,
+            vec![
+                Entry::debit(wallet, amount.clone()),
+                Entry::credit(escrow_acct, amount),
+            ],
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let m = stakes::escrow_mismatches(&pool).await.unwrap();
+    assert_eq!(m.len(), 1);
+    assert_eq!((m[0].held_minor, m[0].expected_minor), (7, 0));
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_settlement_that_fails_part_way_moves_nothing_and_succeeds_when_retried(pool: PgPool) {
+    let (game, w, b) = started(&pool).await;
+    finish(&pool, game, "white", 40).await;
+    scored(&pool, game, &[]).await;
+    // Something else already used the settlement's idempotency key with different content: the posting is refused after
+    // the game row is locked and the accounts are looked up, i.e. part way through.
+    let escrow_acct = system_account(&pool, ESCROW_KIND, &usdc(), Side::Credit)
+        .await
+        .unwrap();
+    let wallet_b = user_wallet(&pool, b, &usdc()).await.unwrap();
+    let one = Amount::new(1, usdc()).unwrap();
+    post(
+        &pool,
+        &Posting::new(
+            IdempotencyKey::new(&format!("stake:{game}:settle")).unwrap(),
+            "other",
+            None,
+            vec![
+                Entry::debit(escrow_acct, one.clone()),
+                Entry::credit(wallet_b, one),
+            ],
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert!(stakes::settle(&pool, game, SCORER, 0).await.is_err());
+    let unsettled: bool = sqlx::query_scalar("SELECT settled_at IS NULL FROM games WHERE id = $1")
+        .bind(game)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(unsettled, "a failed settlement leaves the game unsettled");
+    assert_eq!(
+        (wallet(&pool, w).await, wallet(&pool, b).await),
+        (600, 601),
+        "only the stranger's one unit moved"
+    );
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn there_is_only_ever_one_escrow_account_per_asset_even_when_games_open_at_once(
+    pool: PgPool,
+) {
+    let players: Vec<Uuid> = {
+        let mut v = Vec::new();
+        for _ in 0..6 {
+            v.push(player(&pool, 1_000).await);
+        }
+        v
+    };
+    // Six games opened at the same moment on a database that has no escrow account yet.
+    let one = stake(100);
+    let opens = players
+        .iter()
+        .map(|p| games::create_game(&pool, *p, 300_000, 0, "white", true, Some(&one)));
+    for r in futures::future::join_all(opens).await {
+        r.unwrap();
+    }
+    let accounts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ledger_accounts WHERE kind = $1 AND owner_id IS NULL",
+    )
+    .bind(ESCROW_KIND)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(accounts, 1);
+    assert_eq!(escrow(&pool).await, 600);
+    assert!(stakes::escrow_mismatches(&pool).await.unwrap().is_empty());
+}

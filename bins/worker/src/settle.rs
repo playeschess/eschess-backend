@@ -79,6 +79,9 @@ pub struct SettleReport {
     pub waiting: usize,
     /// Games whose settlement failed (logged); they are retried next round.
     pub failed: usize,
+    /// Assets whose escrow did not equal the stakes of unsettled games this round. Should always be 0; each one is
+    /// logged as an error.
+    pub escrow_mismatches: usize,
 }
 
 /// One round: settle up to `config.batch` finished staked games.
@@ -99,6 +102,23 @@ pub async fn tick(pool: &PgPool, config: &SettleConfig) -> Result<SettleReport, 
         });
     }
     let mut report = SettleReport::default();
+    // The alarm (ADR 0004 §7): escrow must always equal the stakes of unsettled games. If it does not, something is
+    // wrong with the money, and paying more pots out of it would hide or compound the problem: stop the line, say so
+    // loudly every round, and repair nothing automatically.
+    for m in stakes::escrow_mismatches(pool)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        tracing::error!(
+            asset = %m.asset, held = m.held_minor, expected = m.expected_minor,
+            "ESCROW MISMATCH: the stake escrow does not equal the stakes of unsettled games; settlement is stopped until a person investigates"
+        );
+        report.escrow_mismatches += 1;
+    }
+    if report.escrow_mismatches > 0 {
+        lock.commit().await.map_err(|e| e.to_string())?;
+        return Ok(report);
+    }
     for game in stakes::unsettled(pool, config.batch)
         .await
         .map_err(|e| e.to_string())?
