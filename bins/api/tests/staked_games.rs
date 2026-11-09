@@ -158,3 +158,159 @@ async fn staked_games_are_off_unless_configured(pool: PgPool) {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{b}");
     assert_eq!(wallet(&api, ada_id).await, 2 * FIVE);
 }
+
+fn queue_body(stake: Option<&str>) -> Value {
+    let mut b =
+        json!({ "time_control": { "base_seconds": 180, "increment_seconds": 2 }, "rated": true });
+    if let Some(s) = stake {
+        b["stake"] = json!(s);
+    }
+    b
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn two_players_asking_for_the_same_stake_are_paired_and_both_stakes_held(pool: PgPool) {
+    let api = Api::with_config(pool, config(&[FIVE, 5 * FIVE]));
+    let (ada, ada_id) = funded(&api, "ada", 10 * FIVE).await;
+    let (grace, grace_id) = funded(&api, "grace", 10 * FIVE).await;
+
+    let (status, b) = api
+        .post("/v1/matchmaking", &ada, queue_body(Some("5")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(b["status"], "queued");
+    assert_eq!(
+        wallet(&api, ada_id).await,
+        10 * FIVE,
+        "nothing is held while waiting"
+    );
+
+    let (_, b) = api
+        .post("/v1/matchmaking", &grace, queue_body(Some("5")))
+        .await;
+    assert_eq!(b["status"], "matched", "{b}");
+    assert_eq!(
+        (wallet(&api, ada_id).await, wallet(&api, grace_id).await),
+        (9 * FIVE, 9 * FIVE)
+    );
+    let game = id_of(&api.get("/v1/matchmaking", &ada).await.1["game"]);
+    let (_, g) = api.get(&format!("/v1/games/{game}"), &ada).await;
+    assert_eq!(
+        (g["status"].as_str(), g["stake"]["minor"].as_i64()),
+        (Some("active"), Some(FIVE))
+    );
+    assert!(api.count("SELECT count(*) FROM games").await == 1);
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn different_stakes_and_staked_versus_unstaked_never_meet(pool: PgPool) {
+    let api = Api::with_config(pool, config(&[FIVE, 5 * FIVE]));
+    let (ada, _) = funded(&api, "ada", 10 * FIVE).await;
+    let (grace, _) = funded(&api, "grace", 10 * FIVE).await;
+    let (bob, _) = funded(&api, "bob", 10 * FIVE).await;
+    api.post("/v1/matchmaking", &ada, queue_body(Some("5")))
+        .await;
+    let (_, b) = api
+        .post("/v1/matchmaking", &grace, queue_body(Some("25")))
+        .await;
+    assert_eq!(b["status"], "queued", "{b}");
+    let (_, b) = api.post("/v1/matchmaking", &bob, queue_body(None)).await;
+    assert_eq!(b["status"], "queued", "{b}");
+    assert_eq!(api.count("SELECT count(*) FROM games").await, 0);
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_player_who_cannot_stake_is_refused_up_front_or_dropped_when_it_comes_to_pairing(
+    pool: PgPool,
+) {
+    let api = Api::with_config(pool, config(&[FIVE]));
+    let (ada, ada_id) = funded(&api, "ada", 5 * FIVE).await;
+    let (grace, grace_id) = funded(&api, "grace", 5 * FIVE).await;
+    let (poor, _) = funded(&api, "poor", FIVE - 1).await;
+
+    // Plainly unable: refused at the door.
+    let (status, b) = api
+        .post("/v1/matchmaking", &poor, queue_body(Some("5")))
+        .await;
+    assert_eq!(
+        (status, code(&b)),
+        (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_funds"),
+        "{b}"
+    );
+
+    // Ada queues, then spends her money (a withdrawal, say) before anyone is found.
+    api.post("/v1/matchmaking", &ada, queue_body(Some("5")))
+        .await;
+    let custody = system_account(&api.pool, CUSTODY_KIND, &usdc(), Side::Debit)
+        .await
+        .unwrap();
+    let wallet_acct = user_wallet(&api.pool, ada_id, &usdc()).await.unwrap();
+    let all = Amount::new(5 * FIVE, usdc()).unwrap();
+    post(
+        &api.pool,
+        &Posting::new(
+            IdempotencyKey::new("ada-spends-it").unwrap(),
+            "withdrawal_request",
+            None,
+            vec![
+                Entry::debit(wallet_acct, all.clone()),
+                Entry::credit(custody, all),
+            ],
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // Grace arrives: the pair fails on Ada's stake, Ada is dropped, Grace waits, and no money moved.
+    let (_, b) = api
+        .post("/v1/matchmaking", &grace, queue_body(Some("5")))
+        .await;
+    assert_eq!(b["status"], "queued", "{b}");
+    assert_eq!(
+        api.get("/v1/matchmaking", &ada).await.0,
+        StatusCode::NOT_FOUND,
+        "Ada left the queue"
+    );
+    assert_eq!(wallet(&api, grace_id).await, 5 * FIVE);
+    assert_eq!(
+        api.count("SELECT count(*) FROM games").await,
+        0,
+        "the failed pair left no game behind"
+    );
+
+    // Someone else with the money arrives and takes Grace's open slot.
+    let (bob, _) = funded(&api, "bob", 5 * FIVE).await;
+    let (_, b) = api
+        .post("/v1/matchmaking", &bob, queue_body(Some("5")))
+        .await;
+    assert_eq!(b["status"], "matched", "{b}");
+    assert_eq!(wallet(&api, grace_id).await, 4 * FIVE);
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_player_with_a_case_opened_while_queued_is_not_staked_into_a_game(pool: PgPool) {
+    let api = Api::with_config(pool, config(&[FIVE]));
+    let (ada, ada_id) = funded(&api, "ada", 5 * FIVE).await;
+    let (grace, grace_id) = funded(&api, "grace", 5 * FIVE).await;
+    api.post("/v1/matchmaking", &ada, queue_body(Some("5")))
+        .await;
+    sqlx::query("INSERT INTO fairplay_cases (id, player_id) VALUES ($1, $2)")
+        .bind(Uuid::now_v7())
+        .bind(ada_id)
+        .execute(&api.pool)
+        .await
+        .unwrap();
+    let (_, b) = api
+        .post("/v1/matchmaking", &grace, queue_body(Some("5")))
+        .await;
+    assert_eq!(b["status"], "queued", "{b}");
+    assert_eq!(
+        (wallet(&api, ada_id).await, wallet(&api, grace_id).await),
+        (5 * FIVE, 5 * FIVE)
+    );
+}

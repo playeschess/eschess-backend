@@ -331,7 +331,11 @@ case; if the scorer is not running, games stay unsettled rather than pay unrevie
 A finished staked game's JSON carries `stake.settlement`: `settling` while the pot waits for fair play, `settled` once
 paid or returned. Every settle round first checks that the escrow account equals the stakes of unsettled games (one for
 a waiting game, two for a started one); if not it logs an `ESCROW MISMATCH` error and **settles nothing** until a person
-looks. The queue for staked games is still to do.
+looks.
+
+`POST /v1/matchmaking` also takes a `stake`; only players asking for the same stake (and time control) meet. Nothing is
+held while queued: both stakes are held in the transaction that pairs them, all or nothing. A player who can no longer
+stake at that moment (spent the money, a case opened) leaves the queue, the other keeps waiting, and no game is made.
 
 ## Trying it on the testnet
 

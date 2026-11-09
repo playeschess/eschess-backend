@@ -77,6 +77,25 @@ pub struct CreateBody {
     stake: Option<String>,
 }
 
+/// The stake a request asks for: none, or one of the amounts this deployment offers.
+pub(crate) fn parse_stake(
+    state: &AppState,
+    text: Option<&str>,
+) -> Result<Option<eschess_storage::stakes::Stake>, ApiError> {
+    let Some(text) = text else { return Ok(None) };
+    let policy = state
+        .config
+        .stake_policy()
+        .ok_or_else(|| ApiError::Validation("staked games are not offered".into()))?;
+    let minor = eschess_domain::money::Amount::from_decimal_str(text.trim(), policy.asset.clone())
+        .map_err(|_| ApiError::Validation("stake is not an amount".into()))?
+        .minor();
+    policy
+        .stake(minor)
+        .map(Some)
+        .ok_or_else(|| ApiError::Validation("that stake is not one of the amounts offered".into()))
+}
+
 /// Opens a game for another player to join.
 pub async fn create(
     State(state): State<AppState>,
@@ -99,22 +118,7 @@ pub async fn create(
         .increment_seconds
         .checked_mul(1_000)
         .ok_or_else(|| ApiError::Validation("that increment is too large".into()))?;
-    let stake = match b.stake.as_deref() {
-        None => None,
-        Some(text) => {
-            let policy = state
-                .config
-                .stake_policy()
-                .ok_or_else(|| ApiError::Validation("staked games are not offered".into()))?;
-            let minor =
-                eschess_domain::money::Amount::from_decimal_str(text.trim(), policy.asset.clone())
-                    .map_err(|_| ApiError::Validation("stake is not an amount".into()))?
-                    .minor();
-            Some(policy.stake(minor).ok_or_else(|| {
-                ApiError::Validation("that stake is not one of the amounts offered".into())
-            })?)
-        }
-    };
+    let stake = parse_stake(&state, b.stake.as_deref())?;
     let id = games::create_game(
         &state.pool,
         user.user_id,

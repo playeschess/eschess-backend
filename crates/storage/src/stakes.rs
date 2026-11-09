@@ -164,6 +164,24 @@ async fn move_stake(
     Ok(())
 }
 
+/// Whether the player's wallet holds at least the stake. A courtesy check for queueing; the hold itself is what the
+/// ledger enforces.
+pub async fn can_cover(
+    tx: &mut PgConnection,
+    player: Uuid,
+    stake: &Stake,
+) -> Result<bool, GameError> {
+    let have: Option<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(b.balance_minor, 0) FROM ledger_accounts a LEFT JOIN ledger_balances b ON b.account_id = a.id \
+         WHERE a.kind = 'user_wallet' AND a.owner_id = $1 AND a.asset = $2",
+    )
+    .bind(player)
+    .bind(stake.asset.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+    Ok(have.unwrap_or(0) >= stake.minor)
+}
+
 /// Takes a player's stake for a game, from their wallet into escrow. Refuses a player who may not stake and one who
 /// cannot cover it. Holding twice for the same game and player does nothing the second time.
 pub async fn hold(
