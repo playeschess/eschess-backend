@@ -24,6 +24,8 @@ use crate::AppState;
 pub struct QueueBody {
     time_control: TimeControlBody,
     rated: Option<bool>,
+    /// What each player puts on the game, in USDC, as for `POST /v1/games`. Only players asking for the same stake meet.
+    stake: Option<String>,
 }
 
 async fn status_json(state: &AppState, user: &AuthUser, status: Status) -> Result<Value, ApiError> {
@@ -51,12 +53,14 @@ pub async fn join(
         .increment_seconds()
         .checked_mul(1_000)
         .ok_or_else(|| ApiError::Validation("that increment is too large".into()))?;
+    let stake = super::games::parse_stake(&state, b.stake.as_deref())?;
     let status = matchmaking::enqueue(
         &state.pool,
         user.user_id,
         base_ms,
         increment_ms,
         b.rated.unwrap_or(true),
+        stake.as_ref(),
         &mut rand::random::<bool>,
     )
     .await?;

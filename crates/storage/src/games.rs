@@ -925,6 +925,7 @@ pub(crate) async fn start_matched(
     control: TimeControl,
     rated: bool,
     first_plays_white: bool,
+    stake: Option<&Stake>,
 ) -> Result<Uuid> {
     let id = Uuid::now_v7();
     let now = now_ms(db).await?;
@@ -936,8 +937,8 @@ pub(crate) async fn start_matched(
     };
     sqlx::query(
         "INSERT INTO games (id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, fen,
-             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13,$14,now(),1)",
+             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq, stake_minor, stake_asset)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13,$14,now(),1,$15,$16)",
     )
     .bind(id)
     .bind(first)
@@ -953,6 +954,8 @@ pub(crate) async fn start_matched(
     .bind(clock.lag_quota_ms[0] as i64)
     .bind(clock.lag_quota_ms[1] as i64)
     .bind(now)
+    .bind(stake.map(|s| s.minor))
+    .bind(stake.map(|s| s.asset.to_string()))
     .execute(&mut *db)
     .await?;
     Ok(id)
