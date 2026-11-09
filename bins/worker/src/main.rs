@@ -28,6 +28,7 @@ async fn main() {
     // private eschess-fairplay repository builds a worker with the real one.
     spawn_fairplay(pool.clone());
     spawn_settle(pool.clone());
+    spawn_expiry(pool.clone());
 
     let Some(stellar) = config.stellar.clone() else {
         tracing::info!(
@@ -93,6 +94,24 @@ async fn main() {
         }
     }
     shutdown().await;
+}
+
+/// Staked games nobody joins are cancelled, and the stake returned, after STAKED_GAME_WAIT_SECS (default 10 minutes).
+fn spawn_expiry(pool: sqlx::PgPool) {
+    let get = |name: &str| std::env::var(name).ok();
+    let wait = eschess_worker::expire::wait_secs(&get).expect("invalid STAKED_GAME_WAIT_SECS");
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::expire::tick(&pool, wait).await {
+                Ok(r) if r.cancelled > 0 => {
+                    tracing::info!("expiry: {} staked games cancelled", r.cancelled)
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("expiry round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
 }
 
 /// Settling staked games is off unless SETTLE_SCORER names the fair-play scorer to wait for (see `settle`).

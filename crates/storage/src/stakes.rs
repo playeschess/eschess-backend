@@ -453,3 +453,20 @@ pub async fn escrow_mismatches(pool: &PgPool) -> Result<Vec<EscrowMismatch>, sql
         })
         .collect())
 }
+
+/// Staked games still waiting for an opponent that were opened more than `older_than_secs` ago, with their creators,
+/// oldest first. Their stake is locked until someone cancels them, so the worker does it (ADR 0004, build notes).
+pub async fn expired_waiting(
+    pool: &PgPool,
+    older_than_secs: i64,
+    limit: i64,
+) -> Result<Vec<(Uuid, Uuid)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, created_by FROM games WHERE status = 'waiting' AND stake_minor IS NOT NULL \
+         AND created_at < now() - make_interval(secs => $1::float8) ORDER BY created_at, id LIMIT $2",
+    )
+    .bind(older_than_secs as f64)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}

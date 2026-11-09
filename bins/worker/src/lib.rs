@@ -4,6 +4,7 @@
 //!
 //! Every job is safe to run on several workers at once: each round takes a database lock, and every step is idempotent.
 
+pub mod expire;
 pub mod fairplay;
 pub mod sender;
 pub mod settle;
