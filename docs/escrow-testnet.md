@@ -35,12 +35,14 @@ Test players: `GCAXUIIKXD6ZFBCTLBPA32LISCFNI3SPTPMNPIDSJ5ASGOZ4VOWTGCBC` (Ada) a
 | A player calling `create` | Not possible: the call needs the admin's authorization |
 | `refund_expired` before expiry plus grace | Refused, error 7 here only because the match had never been created (an earlier attempt used an expiry that had already passed); the real early-refund check is covered by the unit tests |
 | Admin handover | `propose_admin`, then `pending_admin` showed the right key; the new key could do nothing before `accept_admin`; after it the old key could not act |
-| `refund_expired` by an unrelated key after expiry plus grace | See below |
+| `refund_expired` by an unrelated key after expiry plus grace | Worked: both stakes returned, escrow 0; a second call refused |
 
 ## Expiry refund
 
-Match `52de3146f114bd00dcee4ee18dd21359`, both players deposited, left to expire (expiry 14:13:42 UTC). Result is added
-below when the grace hour has passed.
+Match `52de3146f114bd00dcee4ee18dd21359`: both players deposited and it was left to expire (expiry 14:13:42 UTC, so
+refundable from 15:13:42 UTC). Tested at about 23:15 UTC by a key that is not a player and is no longer the admin
+(`eschess-admin`). `refund_expired` succeeded and returned both stakes: Ada 3 to 4 USDC, Grace 1 to 2, escrow 0. Calling it
+again was refused with error 8 (`NotOpen`). So the "admin disappears" guarantee works on a live network.
 
 ## Things the run showed
 

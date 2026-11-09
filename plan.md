@@ -45,9 +45,9 @@ Not built yet:
 
 ### Step 1. Prove the contract on the testnet
 
-Status: **done on 2026-11-09, except one check still running** (the refund-after-expiry test needs an hour of waiting; result in `docs/escrow-testnet.md`)
+Status: **done on 2026-11-09** (details and results in `docs/escrow-testnet.md`)
 
-What happened: the contract was built (our build and the CI build are byte-identical), deployed to the testnet, and run through a win, a draw, a cancel, the error cases and an admin handover. Contract address and details are in `docs/escrow-testnet.md`. Not yet tried: a player removing their trustline, and a multisig admin.
+What happened: the contract was built (our build and the CI build are byte-identical), deployed to the testnet, and run through a win, a draw, a cancel, the error cases and an admin handover. Contract address and details are in `docs/escrow-testnet.md`. The refund after expiry also worked. Not yet tried: a player removing their trustline, and a multisig admin.
 
 1. Get the Stellar command-line tool and the contract's built file (the contract repo's CI builds it).
 2. Deploy the contract to the Stellar testnet with a new admin key for our server.
