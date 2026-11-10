@@ -232,3 +232,92 @@ pub async fn mark_setup_ready(pool: &PgPool, user: Uuid) -> Result<(), WalletErr
     .await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Watching players' own addresses for deposits
+
+/// How often an address is looked at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WatchTiming {
+    /// While the owner is likely to be depositing: this often.
+    pub hot_secs: f64,
+    /// How long after the last activity (asking how to deposit, money arriving) an address stays hot.
+    pub hot_window_secs: f64,
+    /// Otherwise: this often. A safety net, not the normal path.
+    pub cold_secs: f64,
+}
+
+impl Default for WatchTiming {
+    fn default() -> Self {
+        WatchTiming {
+            hot_secs: 5.0,
+            hot_window_secs: 3_600.0,
+            cold_secs: 300.0,
+        }
+    }
+}
+
+/// The owner is about to deposit (they asked how): look at their address soon and often for a while.
+pub async fn touch_watch(pool: &PgPool, user: Uuid) -> Result<(), WalletError> {
+    sqlx::query(
+        "INSERT INTO wallet_watch (user_id) SELECT user_id FROM user_wallet_keys WHERE user_id = $1 \
+         ON CONFLICT (user_id) DO UPDATE SET last_activity_at = now(), next_check_at = now()",
+    )
+    .bind(user)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Addresses that are ready to receive money and due to be looked at, the most overdue first.
+pub async fn due_for_watch(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<(Uuid, AccountKey)>, WalletError> {
+    let rows = sqlx::query(
+        "SELECT k.user_id, k.address FROM wallet_setup s \
+         JOIN user_wallet_keys k ON k.user_id = s.user_id \
+         LEFT JOIN wallet_watch w ON w.user_id = s.user_id \
+         WHERE s.ready_at IS NOT NULL AND COALESCE(w.next_check_at, '-infinity') <= now() \
+         ORDER BY COALESCE(w.next_check_at, '-infinity'), k.user_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            Ok((
+                r.get("user_id"),
+                AccountKey::parse(&r.get::<String, _>("address"))
+                    .map_err(|e| WalletError::Corrupt(e.to_string()))?,
+            ))
+        })
+        .collect()
+}
+
+/// An address was looked at. `found_money` keeps it hot; otherwise it cools down once its window has passed.
+pub async fn record_watched(
+    pool: &PgPool,
+    user: Uuid,
+    found_money: bool,
+    timing: WatchTiming,
+) -> Result<(), WalletError> {
+    sqlx::query(
+        "INSERT INTO wallet_watch (user_id, last_checked_at, next_check_at) \
+         VALUES ($1, now(), now() + make_interval(secs => $3::float8)) \
+         ON CONFLICT (user_id) DO UPDATE SET \
+           last_checked_at = now(), \
+           last_activity_at = CASE WHEN $2 THEN now() ELSE wallet_watch.last_activity_at END, \
+           next_check_at = now() + make_interval(secs => CASE \
+             WHEN (CASE WHEN $2 THEN now() ELSE wallet_watch.last_activity_at END) > now() - make_interval(secs => $4::float8) \
+             THEN $3::float8 ELSE $5::float8 END)",
+    )
+    .bind(user)
+    .bind(found_money)
+    .bind(timing.hot_secs)
+    .bind(timing.hot_window_secs)
+    .bind(timing.cold_secs)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
