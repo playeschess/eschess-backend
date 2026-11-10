@@ -147,9 +147,18 @@ pub fn id_of(body: &Value) -> Uuid {
 impl Api {
     /// With a master key for players' wallet keys (ADR 0006).
     pub fn with_vault(pool: PgPool, vault: Arc<dyn eschess_stellar::custody::KeyVault>) -> Api {
+        Api::with_vault_and_config(pool, vault, Config::default())
+    }
+
+    /// With a master key and a configuration (one with Stellar on, for the wallet routes).
+    pub fn with_vault_and_config(
+        pool: PgPool,
+        vault: Arc<dyn eschess_stellar::custody::KeyVault>,
+        config: Config,
+    ) -> Api {
         let state = AppState {
             pool: pool.clone(),
-            config: Arc::new(Config::default()),
+            config: Arc::new(config),
             mailer: Arc::new(CapturingMailer::default()),
             hub: eschess_api::hub::Hub::new(),
             chain: None,
