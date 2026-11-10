@@ -7,7 +7,7 @@ use eschess_stellar::signer::{LocalSigner, Signer};
 use eschess_stellar::tx::Network;
 use eschess_stellar::Chain;
 use eschess_worker::fairplay::FairplayConfig;
-use eschess_worker::sender::{tick, SenderConfig};
+use eschess_worker::sender::{tick_with, OwnAccounts, SenderConfig};
 
 #[tokio::main]
 async fn main() {
@@ -76,6 +76,25 @@ async fn main() {
                     .max(500),
             );
             let (pool, chain) = (pool.clone(), chain.clone());
+            // With the master key that seals players' keys, withdrawals are paid from the player's own account when it
+            // holds the money (ADR 0006); without it, only from the hot wallet.
+            let own = std::env::var("WALLET_MASTER_KEY_FILE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|path| OwnAccounts {
+                    vault: Arc::new(
+                        eschess_stellar::custody::LocalVault::from_file(
+                            std::path::Path::new(path.trim()),
+                            1,
+                            network,
+                        )
+                        .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}")),
+                    ),
+                });
+            tracing::info!(
+                "paying withdrawals from players' own accounts when they hold the money: {}",
+                own.is_some()
+            );
             tracing::info!(
                 "sending withdrawals from {} on the Stellar {}",
                 stellar.hot_account.to_g(),
@@ -87,7 +106,9 @@ async fn main() {
                         .duration_since(std::time::UNIX_EPOCH)
                         .expect("the clock is after 1970")
                         .as_secs() as i64;
-                    if let Err(e) = tick(&pool, chain.as_ref(), &signer, &sender, now).await {
+                    if let Err(e) =
+                        tick_with(&pool, chain.as_ref(), &signer, &sender, own.as_ref(), now).await
+                    {
                         tracing::warn!("withdrawal round failed (will retry): {e}");
                     }
                     tokio::time::sleep(poll).await;

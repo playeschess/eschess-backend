@@ -325,6 +325,13 @@ schedule: every few seconds while the player is likely to be depositing (they ju
 every five minutes otherwise, and each address keeps its own position so a late look misses nothing. The shared platform
 address keeps working alongside it (ADR 0006).
 
+Withdrawals follow the money (ADR 0006): with `WALLET_MASTER_KEY_FILE` set on the worker, a withdrawal is paid **from the
+player's own account** when that account holds at least the amount and enough XLM to pay the fee and keep its reserve
+(1.5 XLM plus the fee), signed with their key through the vault. Otherwise (money that arrived before they had an account
+of their own, or a player without one) it is paid from the platform's hot wallet as before. The ledger treats all custody
+as one pool, so either way it settles the same; the limits, approvals and the hold during a fair-play case are unchanged.
+The player's account pays the network fee (a fraction of a cent of XLM) until fees are paid by the platform.
+
 ## The escrow contract from the backend (crates/stellar)
 
 `crates/stellar` can call the escrow contract in `eschess-contracts` (`soroban.rs`, `escrow.rs`): it builds the call,

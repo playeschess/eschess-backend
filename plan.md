@@ -77,7 +77,8 @@ Status: **in progress** (design accepted in `docs/adr/0006-user-wallets.md`).
 - Done: the key vault and encrypted key store; every new user gets their own address at signup (testnet master key in a file).
 - Done: the first deposit intent asks for the account to be set up on the network; the worker creates it, funds it with XLM and adds the USDC trustline in one transaction. Proven on the real testnet (a brand-new key became a ready account in 8 seconds).
 - Done: deposits to a player's own address are watched (often while they are depositing, rarely otherwise) and credited exactly once; the address is shown once the account is ready. Proven on the real testnet with a real USDC payment.
-- Next: withdrawals from the player's own account, then the books-against-chain check.
+- Done: withdrawals are paid from the player's own account when it holds the money (the platform wallet otherwise). Proven on the real testnet: new key, account set up, 1 USDC deposited and credited, 0.5 USDC withdrawn from the player's own account.
+- Next: the books-against-chain check (compare every wallet's balance on the network with what the ledger says), then staking through the contract.
 
 1. When someone signs up, create a Stellar account for them (we pay the small starting reserve and add the USDC trustline).
 2. Store their key encrypted, readable only by the server.

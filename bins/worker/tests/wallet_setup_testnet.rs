@@ -5,6 +5,8 @@
 //!   WALLET_MASTER_KEY_FILE=...     64 hex characters, chmod 600
 //!   EXTERNAL_SECRET_FILE=...       (optional) an account holding testnet USDC; if set, the test also sends it 1 USDC to the
 //!                                  new player's address and checks that the watcher credits it
+//!   HOT_SECRET_FILE=...            (optional, with EXTERNAL_SECRET_FILE) the platform's wallet key; if set, the test then
+//!                                  withdraws half of it back out and checks it is paid from the player's own account
 //! Run: cargo test -p eschess-worker --test wallet_setup_testnet -- --ignored --nocapture
 
 use std::path::Path;
@@ -103,6 +105,7 @@ async fn the_worker_sets_up_a_brand_new_players_account_on_the_real_testnet(pool
     assert_eq!(attempts, 1, "one transaction did it all");
 
     deposit_phase(&pool, &chain, user, &address, &usdc).await;
+    withdraw_phase(&pool, &chain, vault.clone(), user, &address, &usdc).await;
 }
 
 /// Sends 1 USDC from the account in EXTERNAL_SECRET_FILE to the player's address with our own payment code, then lets the
@@ -172,4 +175,129 @@ async fn deposit_phase(
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     panic!("the deposit was not credited");
+}
+
+/// Withdraws 0.5 USDC to the external account and checks the player's own account paid it. Skipped unless both
+/// HOT_SECRET_FILE and EXTERNAL_SECRET_FILE are set.
+async fn withdraw_phase(
+    pool: &PgPool,
+    chain: &HorizonChain,
+    vault: Arc<dyn KeyVault>,
+    user: Uuid,
+    address: &eschess_domain::stellar::AccountKey,
+    usdc: &AssetId,
+) {
+    use eschess_domain::money::Amount;
+    use eschess_stellar::tx::PaymentMemo;
+    use eschess_storage::withdrawals::{self, NewWithdrawal, Policy, Status};
+    use eschess_worker::sender::{tick_with, OwnAccounts, SenderConfig};
+    let (Ok(hot_file), Ok(ext_file)) = (
+        std::env::var("HOT_SECRET_FILE"),
+        std::env::var("EXTERNAL_SECRET_FILE"),
+    ) else {
+        println!("HOT_SECRET_FILE or EXTERNAL_SECRET_FILE not set: skipping the withdrawal phase");
+        return;
+    };
+    let hot = LocalSigner::from_file(Path::new(&hot_file), Network::Testnet).unwrap();
+    let external = LocalSigner::from_file(Path::new(&ext_file), Network::Testnet).unwrap();
+    let destination = external.public_key().to_g();
+    let usdc_before_dest = chain
+        .account(&destination)
+        .await
+        .unwrap()
+        .unwrap()
+        .balance_of(usdc);
+    let own_before = chain
+        .account(&address.to_g())
+        .await
+        .unwrap()
+        .unwrap()
+        .balance_of(usdc);
+    assert_eq!(
+        own_before, 10_000_000,
+        "the player's account holds the 1 USDC that was deposited"
+    );
+
+    let (w, _) = withdrawals::request(
+        pool,
+        &NewWithdrawal {
+            user_id: user,
+            client_request_id: Uuid::now_v7(),
+            amount: Amount::new(5_000_000, usdc.clone()).unwrap(),
+            destination,
+            memo: PaymentMemo::None,
+        },
+        Policy {
+            auto_approve_up_to_minor: i64::MAX,
+            daily_limit_minor: i64::MAX,
+        },
+    )
+    .await
+    .unwrap();
+    let config = SenderConfig {
+        network: Network::Testnet,
+        hot_account: hot.public_key(),
+        fee_stroops: 1_000,
+        tx_timeout_secs: 120,
+        expiry_margin_secs: 60,
+    };
+    let own = OwnAccounts { vault };
+    for round in 1..=20 {
+        let now = chain.latest_ledger_close_time().await.unwrap();
+        let r = tick_with(pool, chain, &hot, &config, Some(&own), now)
+            .await
+            .unwrap();
+        println!("withdrawal round {round}: {r:?}");
+        if withdrawals::get(pool, w.id).await.unwrap().status == Status::Confirmed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    assert_eq!(
+        withdrawals::get(pool, w.id).await.unwrap().status,
+        Status::Confirmed
+    );
+    let source: String = sqlx::query_scalar(
+        "SELECT source_account FROM withdrawal_attempts WHERE withdrawal_id = $1",
+    )
+    .bind(w.id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        source,
+        address.to_g(),
+        "paid from the player's own account, not the platform wallet"
+    );
+
+    // The network agrees: the player's account lost 0.5 USDC, the destination gained it, and the ledger has 0.5 left.
+    let own_after = chain
+        .account(&address.to_g())
+        .await
+        .unwrap()
+        .unwrap()
+        .balance_of(usdc);
+    let dest_after = chain
+        .account(&external.public_key().to_g())
+        .await
+        .unwrap()
+        .unwrap()
+        .balance_of(usdc);
+    assert_eq!(
+        (own_after, dest_after - usdc_before_dest),
+        (5_000_000, 5_000_000)
+    );
+    let wallet = eschess_storage::stellar::user_wallet(pool, user, usdc)
+        .await
+        .unwrap();
+    assert_eq!(
+        eschess_storage::ledger::balance(pool, wallet)
+            .await
+            .unwrap()
+            .minor,
+        5_000_000
+    );
+    println!(
+        "withdrew 0.5 USDC from the player's own account; 0.5 left on chain and in the ledger"
+    );
 }

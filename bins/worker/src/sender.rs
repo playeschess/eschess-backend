@@ -14,6 +14,12 @@
 //!    submitting leaves a hash to look up rather than a payment nobody knows about.
 //!
 //! A round holds a database lock, so several workers can run without two of them sending at once.
+//!
+//! **Where the money comes from (ADR 0006).** A player whose own account holds enough of the asset, and enough XLM to pay
+//! the fee and keep its reserve, is paid **from their own account**, signed with their key through the vault. Otherwise
+//! (money that arrived before they had an account of their own, or a player without one) it is paid from the platform's
+//! hot wallet, as before. The ledger treats all custody as one pool, so either way it settles the same; the books-against-
+//! chain check compares the total. Resolving an attempt works from its hash and does not care which account it came from.
 
 use eschess_domain::stellar::{AccountKey, Address};
 use eschess_stellar::signer::Signer;
@@ -97,12 +103,35 @@ pub struct TickReport {
     pub sent: Option<Uuid>,
 }
 
-/// One round: resolve what is in flight, then send the next withdrawal if nothing is. `now` is unix seconds.
+/// Lets the sender pay from players' own accounts (ADR 0006): the vault that opens their keys.
+#[derive(Clone)]
+pub struct OwnAccounts {
+    pub vault: std::sync::Arc<dyn eschess_stellar::custody::KeyVault>,
+}
+
+/// The least XLM a player's own account must hold to be paid from: its reserve (two base reserves and a trustline), and
+/// room for the fee. Below this the platform's wallet pays instead, so the account is never driven under its reserve.
+pub const OWN_ACCOUNT_MIN_XLM_STROOPS: i64 = 15_000_000;
+
+/// One round: resolve what is in flight, then send the next withdrawal if nothing is. `now` is unix seconds. Pays only
+/// from the hot wallet; see [`tick_with`] to pay from players' own accounts too.
 pub async fn tick(
     pool: &PgPool,
     chain: &dyn Chain,
     signer: &dyn Signer,
     config: &SenderConfig,
+    now: i64,
+) -> Result<TickReport, String> {
+    tick_with(pool, chain, signer, config, None, now).await
+}
+
+/// [`tick`], paying from a player's own account when it holds the money and `own` is given.
+pub async fn tick_with(
+    pool: &PgPool,
+    chain: &dyn Chain,
+    signer: &dyn Signer,
+    config: &SenderConfig,
+    own: Option<&OwnAccounts>,
     now: i64,
 ) -> Result<TickReport, String> {
     let mut lock = pool.begin().await.map_err(|e| e.to_string())?;
@@ -126,7 +155,7 @@ pub async fn tick(
     repair_failed(pool).await?;
     if report.still_waiting == 0 {
         if let Some(w) = next_to_send(pool).await? {
-            send(pool, chain, signer, config, &w, now, &mut report).await?;
+            send(pool, chain, signer, config, own, &w, now, &mut report).await?;
         }
     }
     lock.commit().await.map_err(|e| e.to_string())?;
@@ -274,25 +303,81 @@ pub async fn repair_failed(pool: &PgPool) -> Result<usize, String> {
     Ok(repaired)
 }
 
+/// Where a withdrawal is paid from.
+enum Source {
+    Hot,
+    /// The player's own account, with the signer that opens their key.
+    Own(eschess_stellar::custody::VaultSigner),
+}
+
+/// Prefers the player's own account when it is set up, holds at least the amount, and has the XLM to pay the fee and keep
+/// its reserve; otherwise the hot wallet.
+async fn choose_source(
+    pool: &PgPool,
+    chain: &dyn Chain,
+    config: &SenderConfig,
+    own: Option<&OwnAccounts>,
+    w: &Withdrawal,
+) -> Result<Source, String> {
+    let Some(own) = own else {
+        return Ok(Source::Hot);
+    };
+    let ready = eschess_storage::wallets::setup_state(pool, w.user_id)
+        .await
+        .map_err(|e| e.to_string())?
+        == eschess_storage::wallets::SetupState::Ready;
+    if !ready {
+        return Ok(Source::Hot);
+    }
+    let Some(signer) = eschess_storage::wallets::signer_for(pool, own.vault.clone(), w.user_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(Source::Hot);
+    };
+    let Some(state) = chain
+        .account(&signer.public_key().to_g())
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(Source::Hot);
+    };
+    let enough_money = state.balance_of(w.amount.asset()) >= w.amount.minor();
+    let enough_xlm = state.balance_of(&eschess_domain::money::AssetId::native())
+        >= OWN_ACCOUNT_MIN_XLM_STROOPS + config.fee_stroops as i64;
+    Ok(if enough_money && enough_xlm {
+        Source::Own(signer)
+    } else {
+        Source::Hot
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send(
     pool: &PgPool,
     chain: &dyn Chain,
     signer: &dyn Signer,
     config: &SenderConfig,
+    own: Option<&OwnAccounts>,
     w: &Withdrawal,
     now: i64,
     report: &mut TickReport,
 ) -> Result<(), String> {
     let destination = Address::parse(&w.destination)
         .map_err(|e| format!("withdrawal {}: stored destination unreadable: {e}", w.id))?;
-    let hot = config.hot_account.to_g();
+    let source = choose_source(pool, chain, config, own, w).await?;
+    let (signer, source_key): (&dyn Signer, AccountKey) = match &source {
+        Source::Hot => (signer, config.hot_account),
+        Source::Own(s) => (s, s.public_key()),
+    };
+    let hot = source_key.to_g();
     let account = chain
         .account(&hot)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("the hot wallet {hot} does not exist on the network"))?;
+        .ok_or_else(|| format!("the account {hot} we pay from does not exist on the network"))?;
     let payment = Payment {
-        source: config.hot_account,
+        source: source_key,
         sequence: account.sequence + 1,
         fee_stroops: config.fee_stroops,
         min_time: 0,

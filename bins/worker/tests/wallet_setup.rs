@@ -38,6 +38,7 @@ impl FakeChain {
             AccountState {
                 sequence,
                 can_receive: if with_usdc { vec![usdc()] } else { vec![] },
+                balances: vec![],
             },
         );
     }
