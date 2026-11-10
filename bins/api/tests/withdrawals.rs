@@ -78,6 +78,7 @@ fn chain() -> Arc<FakeChain> {
         AccountState {
             sequence: 1,
             can_receive: vec![usdc()],
+            balances: vec![],
         },
     );
     accounts.insert(
@@ -85,6 +86,7 @@ fn chain() -> Arc<FakeChain> {
         AccountState {
             sequence: 1,
             can_receive: vec![],
+            balances: vec![],
         },
     );
     drop(accounts);

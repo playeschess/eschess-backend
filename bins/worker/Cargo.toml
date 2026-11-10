@@ -24,3 +24,4 @@ eschess-ledger = { path = "../../crates/ledger" }
 async-trait.workspace = true
 futures.workspace = true
 stellar-xdr.workspace = true
+ed25519-dalek.workspace = true

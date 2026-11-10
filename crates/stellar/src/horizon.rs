@@ -324,9 +324,25 @@ pub fn parse_account(body: &Value) -> Result<AccountState, ChainError> {
         .filter(|b| b.get("is_authorized").and_then(Value::as_bool) == Some(true))
         .filter_map(|b| AssetId::credit(text(b, "asset_code")?, text(b, "asset_issuer")?).ok())
         .collect();
+    // Every balance we can read; one we cannot is left out (so it reads as zero), never guessed.
+    let held = balances
+        .iter()
+        .filter_map(|b| {
+            let asset = match text(b, "asset_type")? {
+                "native" => AssetId::native(),
+                "credit_alphanum4" | "credit_alphanum12" => {
+                    AssetId::credit(text(b, "asset_code")?, text(b, "asset_issuer")?).ok()?
+                }
+                _ => return None,
+            };
+            let amount = Amount::from_decimal_str(text(b, "balance")?, asset.clone()).ok()?;
+            Some((asset, amount.minor()))
+        })
+        .collect();
     Ok(AccountState {
         sequence,
         can_receive,
+        balances: held,
     })
 }
 
@@ -671,6 +687,13 @@ mod tests {
         assert!(a.can_receive(&usdc));
         assert!(a.can_receive(&AssetId::native()));
         assert!(!a.can_receive(&AssetId::credit("FROZENTOKEN", USDC_ISSUER).unwrap()));
+        // What it holds, in smallest units; something it holds none of reads as zero.
+        assert_eq!(a.balance_of(&usdc), 250_000_000);
+        assert_eq!(a.balance_of(&AssetId::native()), 99_999_999_900);
+        assert_eq!(
+            a.balance_of(&AssetId::credit("OTHER", USDC_ISSUER).unwrap()),
+            0
+        );
     }
 
     #[test]

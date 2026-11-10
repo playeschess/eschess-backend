@@ -145,9 +145,20 @@ pub struct AccountState {
     /// The credit assets it holds a trustline for and is authorized to receive. A payment of any other credit asset to
     /// it fails on chain (and still costs a fee). Every account can receive XLM.
     pub can_receive: Vec<AssetId>,
+    /// What the account holds, in each asset's smallest unit (including XLM, which includes the part locked as reserve).
+    /// Assets it holds none of are absent. Left empty by fakes that do not care.
+    pub balances: Vec<(AssetId, i64)>,
 }
 
 impl AccountState {
+    /// How much of `asset` the account holds (0 if none or unknown).
+    pub fn balance_of(&self, asset: &AssetId) -> i64 {
+        self.balances
+            .iter()
+            .find(|(a, _)| a == asset)
+            .map_or(0, |(_, m)| *m)
+    }
+
     pub fn can_receive(&self, asset: &AssetId) -> bool {
         asset.is_native() || self.can_receive.contains(asset)
     }

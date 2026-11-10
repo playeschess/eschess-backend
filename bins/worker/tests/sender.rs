@@ -125,6 +125,7 @@ impl Chain for Net {
         Ok(Some(AccountState {
             sequence: *self.sequence.lock().unwrap(),
             can_receive: vec![usdc()],
+            balances: vec![],
         }))
     }
 
