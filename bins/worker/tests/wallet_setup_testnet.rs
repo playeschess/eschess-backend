@@ -7,7 +7,8 @@
 //!                                  new player's address and checks that the watcher credits it
 //!   HOT_SECRET_FILE=...            (optional, with EXTERNAL_SECRET_FILE) the platform's wallet key; if set, the test then
 //!                                  withdraws half of it back out and checks it is paid from the player's own account
-//! Run: cargo test -p eschess-worker --test wallet_setup_testnet -- --ignored --nocapture
+//! Run: cargo test -p eschess-worker --features live-testnet --test wallet_setup_testnet -- --ignored --nocapture
+#![cfg(feature = "live-testnet")]
 
 use std::path::Path;
 use std::sync::Arc;

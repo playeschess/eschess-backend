@@ -413,6 +413,13 @@ looks.
 held while queued: both stakes are held in the transaction that pairs them, all or nothing. A player who can no longer
 stake at that moment (spent the money, a case opened) leaves the queue, the other keeps waiting, and no game is made.
 
+### Tests that use the real testnet
+
+The tests that need the real Stellar testnet and key files (`escrow_testnet`, `funding_testnet`, `wallet_setup_testnet`) are
+behind a cargo feature, so CI never builds or runs them. Run one with, for example:
+`cargo test -p eschess-worker --features live-testnet --test funding_testnet -- --ignored --nocapture` (each file's header lists
+the key files and settings it needs).
+
 ## Trying it on the testnet
 
 A real deposit and withdrawal, end to end, with disposable testnet wallets. Nothing here touches the public network.

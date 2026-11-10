@@ -7,7 +7,8 @@
 //!   ESCROW_CONTRACT           the deployed contract (C...)
 //!   ESCROW_ADMIN_SECRET_FILE  the contract's current admin
 //!   STELLAR_HOT_SECRET_FILE   the platform wallet, holding at least 1 USDC (tops the players up)
-//! Run: cargo test -p eschess-worker --test funding_testnet -- --ignored --nocapture
+//! Run: cargo test -p eschess-worker --features live-testnet --test funding_testnet -- --ignored --nocapture
+#![cfg(feature = "live-testnet")]
 
 use std::path::Path;
 use std::sync::Arc;
