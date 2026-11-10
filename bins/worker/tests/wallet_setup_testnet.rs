@@ -315,6 +315,7 @@ async fn check_phase(pool: &PgPool, chain: &HorizonChain, funder: &LocalSigner, 
             hot_account: funder.public_key(),
             assets: vec![usdc.clone()],
             mismatches_to_halt: 3,
+            contract: None,
         },
     )
     .await

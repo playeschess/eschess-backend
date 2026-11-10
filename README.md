@@ -372,6 +372,11 @@ the match closed does the ledger move the same pot. If the worker dies in betwee
 what the network was told, never from a fresh decision. A match the network refunded returns both stakes in the ledger. The
 ledger settle job leaves contract games alone, and a halt from the books-against-chain check stops payouts on both paths.
 
+The books-against-chain check counts what the escrow contract holds (set `ESCROW_CONTRACT` on the worker, which also runs the
+check): stakes locked in a match leave the players' accounts, so without the contract the network would look short of the
+ledger. A game that is locking its stakes, or any transaction to the contract in the last three minutes, counts as money in
+motion, so a difference seen while the accounts and the contract are read one after the other is only inconclusive.
+
 ## Staked games (crates/storage, bins/worker) — testnet only
 
 A rated game can carry a stake from the list in `STAKES_USDC`. The creator's stake is held (wallet to a `stake_escrow`

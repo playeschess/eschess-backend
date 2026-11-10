@@ -42,13 +42,21 @@ pub async fn on_chain_not_in_ledger(pool: &PgPool, asset: &AssetId) -> Result<i6
     .await
 }
 
-/// Whether money is in motion: a withdrawal is being sent (it may or may not have landed yet), or a deposit has been seen
-/// and not yet credited. While it is, a difference is not conclusive.
+/// How recent a transaction to or from the contract must be to count as money in motion, in seconds: long enough to cover
+/// the network's own delay in showing it, so the accounts and the contract are not read on either side of one.
+pub const CONTRACT_MOTION_SECS: i64 = 180;
+
+/// Whether money is in motion: a withdrawal is being sent (it may or may not have landed yet), a deposit has been seen
+/// and not yet credited, a game is having its stakes locked in the contract, or a transaction to the contract was sent a
+/// moment ago. While it is, a difference is not conclusive: the accounts and the contract are read one after the other.
 pub async fn money_in_motion(pool: &PgPool) -> Result<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM withdrawals WHERE status = 'submitting') \
-             OR EXISTS (SELECT 1 FROM stellar_deposits WHERE status = 'pending')",
+             OR EXISTS (SELECT 1 FROM stellar_deposits WHERE status = 'pending') \
+             OR EXISTS (SELECT 1 FROM games WHERE status = 'funding') \
+             OR EXISTS (SELECT 1 FROM contract_txs WHERE created_at > now() - make_interval(secs => $1::float8))",
     )
+    .bind(CONTRACT_MOTION_SECS as f64)
     .fetch_one(pool)
     .await
 }
@@ -102,6 +110,8 @@ pub struct Check {
     pub chain_minor: i64,
     pub hot_minor: i64,
     pub players_minor: i64,
+    /// What the escrow contract holds (0 where there is none).
+    pub contract_minor: i64,
     pub explained_minor: i64,
     pub difference_minor: i64,
     pub verdict: Verdict,
@@ -114,23 +124,25 @@ pub struct Reading {
     pub ledger: i64,
     pub hot: i64,
     pub players: i64,
+    pub contract: i64,
     pub explained: i64,
     pub in_motion: bool,
     pub accounts_read: i32,
 }
 
 pub async fn record_check(pool: &PgPool, asset: &AssetId, r: Reading) -> Result<Check> {
-    let chain = r.hot + r.players;
+    let chain = r.hot + r.players + r.contract;
     let (difference, verdict) = judge(r.ledger, chain, r.explained, r.in_motion);
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO money_checks (asset, ledger_minor, chain_minor, hot_minor, players_minor, explained_minor, \
-         difference_minor, verdict, accounts_read) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+        "INSERT INTO money_checks (asset, ledger_minor, chain_minor, hot_minor, players_minor, contract_minor, explained_minor, \
+         difference_minor, verdict, accounts_read) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
     )
     .bind(asset.to_string())
     .bind(r.ledger)
     .bind(chain)
     .bind(r.hot)
     .bind(r.players)
+    .bind(r.contract)
     .bind(r.explained)
     .bind(difference)
     .bind(verdict.as_str())
@@ -144,6 +156,7 @@ pub async fn record_check(pool: &PgPool, asset: &AssetId, r: Reading) -> Result<
         chain_minor: chain,
         hot_minor: r.hot,
         players_minor: r.players,
+        contract_minor: r.contract,
         explained_minor: r.explained,
         difference_minor: difference,
         verdict,
@@ -214,7 +227,7 @@ pub async fn clear_halt(pool: &PgPool, by: Uuid, note: &str) -> Result<bool> {
 /// The latest check for each asset.
 pub async fn latest_checks(pool: &PgPool) -> Result<Vec<Check>> {
     let rows = sqlx::query(
-        "SELECT DISTINCT ON (asset) id, asset, ledger_minor, chain_minor, hot_minor, players_minor, explained_minor, \
+        "SELECT DISTINCT ON (asset) id, asset, ledger_minor, chain_minor, hot_minor, players_minor, contract_minor, explained_minor, \
          difference_minor, verdict, accounts_read FROM money_checks ORDER BY asset, id DESC",
     )
     .fetch_all(pool)
@@ -228,6 +241,7 @@ pub async fn latest_checks(pool: &PgPool) -> Result<Vec<Check>> {
             chain_minor: r.get("chain_minor"),
             hot_minor: r.get("hot_minor"),
             players_minor: r.get("players_minor"),
+            contract_minor: r.get("contract_minor"),
             explained_minor: r.get("explained_minor"),
             difference_minor: r.get("difference_minor"),
             verdict: match r.get::<String, _>("verdict").as_str() {

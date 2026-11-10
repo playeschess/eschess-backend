@@ -17,7 +17,7 @@ fn check_json(c: &reconcile::Check) -> Value {
     json!({
         "asset": c.asset, "verdict": format!("{:?}", c.verdict).to_lowercase(),
         "ledger_minor": c.ledger_minor, "chain_minor": c.chain_minor, "hot_minor": c.hot_minor,
-        "players_minor": c.players_minor, "explained_minor": c.explained_minor,
+        "players_minor": c.players_minor, "contract_minor": c.contract_minor, "explained_minor": c.explained_minor,
         "difference_minor": c.difference_minor, "accounts_read": c.accounts_read,
     })
 }
