@@ -319,9 +319,11 @@ With `WALLET_MASTER_KEY_FILE` set, every new player gets a Stellar key of their 
 bound to the player and address) and opened only to sign. The first time a player asks how to deposit, the worker (with
 `WALLET_FUNDER_SECRET_FILE`, funding `WALLET_FUNDING_XLM`, default 2, from the platform's funding account) sets their
 account up on the network: it creates and funds it and adds the USDC trustline in one transaction, and
-`GET /v1/wallet/deposit-info` reports `own_wallet.status` (`setting_up` or `ready`). The player's own address is **not**
-offered as a place to send money yet: deposits are still credited through the shared platform address until the
-deposit watcher moves over (ADR 0006, `plan.md` step 3).
+`GET /v1/wallet/deposit-info` reports `own_wallet.status` (`setting_up` or `ready`) and, once ready, `own_wallet.address`:
+USDC sent there is credited to the player (whatever memo it carries). The worker looks at each ready address on a
+schedule: every few seconds while the player is likely to be depositing (they just asked how, or money just arrived),
+every five minutes otherwise, and each address keeps its own position so a late look misses nothing. The shared platform
+address keeps working alongside it (ADR 0006).
 
 ## The escrow contract from the backend (crates/stellar)
 

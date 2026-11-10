@@ -40,8 +40,8 @@ pub async fn deposit_info(
         .await
         .map_err(ApiError::internal)?;
     let muxed = st.hot_account.muxed(id as u64).to_m();
-    // The first deposit intent is also the moment to set up the player's own account on the network (ADR 0006). Their
-    // own address is not offered as a place to send money yet: nothing watches it until deposits move over.
+    // The first deposit intent is also the moment to set up the player's own account on the network (ADR 0006). Once it
+    // is ready the address is offered as the place to send USDC, and watched closely for a while.
     let own_wallet = match &state.vault {
         None => None,
         Some(vault) => {
@@ -49,12 +49,22 @@ pub async fn deposit_info(
                 eschess_storage::wallets::ensure_wallet(&state.pool, &**vault, user.user_id)
                     .await?;
                 eschess_storage::wallets::request_setup(&state.pool, user.user_id).await?;
-                eschess_storage::wallets::setup_state(&state.pool, user.user_id).await
+                let setup =
+                    eschess_storage::wallets::setup_state(&state.pool, user.user_id).await?;
+                if setup == eschess_storage::wallets::SetupState::Ready {
+                    eschess_storage::wallets::touch_watch(&state.pool, user.user_id).await?;
+                }
+                Ok::<_, eschess_storage::wallets::WalletError>(setup)
             }
             .await;
             match setup {
-                Ok(eschess_storage::wallets::SetupState::Ready) => Some("ready"),
-                Ok(_) => Some("setting_up"),
+                Ok(eschess_storage::wallets::SetupState::Ready) => {
+                    match eschess_storage::wallets::address_of(&state.pool, user.user_id).await {
+                        Ok(Some(address)) => Some(("ready", Some(address.to_g()))),
+                        _ => None,
+                    }
+                }
+                Ok(_) => Some(("setting_up", None)),
                 Err(e) => {
                     tracing::warn!(user = %user.user_id, "could not request the player's wallet setup: {e}");
                     None
@@ -63,7 +73,14 @@ pub async fn deposit_info(
         }
     };
     Ok(Json(json!({
-        "own_wallet": own_wallet.map(|status| json!({ "status": status })),
+        "own_wallet": own_wallet.map(|(status, address)| match address {
+            Some(address) => json!({
+                "status": status,
+                "address": address,
+                "instructions": "Send USDC (from this issuer) to this address. It is credited to your balance once it arrives.",
+            }),
+            None => json!({ "status": status }),
+        }),
         "network": st.network,
         "asset": { "code": st.usdc.code(), "issuer": st.usdc.issuer(), "id": st.usdc.to_string() },
         "muxed_address": muxed,

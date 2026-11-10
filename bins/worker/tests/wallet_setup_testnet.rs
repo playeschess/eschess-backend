@@ -3,6 +3,8 @@
 //! Needs the network and two testnet key files:
 //!   WALLET_FUNDER_SECRET_FILE=...  an account with testnet XLM (the platform's funding account)
 //!   WALLET_MASTER_KEY_FILE=...     64 hex characters, chmod 600
+//!   EXTERNAL_SECRET_FILE=...       (optional) an account holding testnet USDC; if set, the test also sends it 1 USDC to the
+//!                                  new player's address and checks that the watcher credits it
 //! Run: cargo test -p eschess-worker --test wallet_setup_testnet -- --ignored --nocapture
 
 use std::path::Path;
@@ -12,7 +14,7 @@ use std::time::Duration;
 use eschess_domain::money::AssetId;
 use eschess_stellar::custody::{KeyVault, LocalVault};
 use eschess_stellar::horizon::HorizonChain;
-use eschess_stellar::signer::LocalSigner;
+use eschess_stellar::signer::{LocalSigner, Signer};
 use eschess_stellar::tx::Network;
 use eschess_stellar::Chain;
 use eschess_storage::wallets::{self, SetupState};
@@ -99,4 +101,75 @@ async fn the_worker_sets_up_a_brand_new_players_account_on_the_real_testnet(pool
         .unwrap();
     println!("ready after {attempts} transaction(s)");
     assert_eq!(attempts, 1, "one transaction did it all");
+
+    deposit_phase(&pool, &chain, user, &address, &usdc).await;
+}
+
+/// Sends 1 USDC from the account in EXTERNAL_SECRET_FILE to the player's address with our own payment code, then lets the
+/// watcher find and credit it. Skipped if EXTERNAL_SECRET_FILE is not set.
+async fn deposit_phase(
+    pool: &PgPool,
+    chain: &HorizonChain,
+    user: Uuid,
+    address: &eschess_domain::stellar::AccountKey,
+    usdc: &AssetId,
+) {
+    use eschess_domain::money::Amount;
+    use eschess_stellar::tx::{self, Payment, PaymentMemo};
+    let Ok(file) = std::env::var("EXTERNAL_SECRET_FILE") else {
+        println!("EXTERNAL_SECRET_FILE not set: skipping the deposit phase");
+        return;
+    };
+    let external = LocalSigner::from_file(Path::new(&file), Network::Testnet).unwrap();
+    let account = chain
+        .account(&external.public_key().to_g())
+        .await
+        .unwrap()
+        .unwrap();
+    let now = chain.latest_ledger_close_time().await.unwrap() as u64;
+    let payment = Payment {
+        source: external.public_key(),
+        sequence: account.sequence + 1,
+        fee_stroops: 1_000,
+        min_time: 0,
+        max_time: now + 120,
+        destination: eschess_domain::stellar::Address::Account(*address),
+        amount: Amount::new(10_000_000, usdc.clone()).unwrap(),
+        memo: PaymentMemo::None,
+    };
+    let signed = tx::sign(&payment, Network::Testnet, &external)
+        .await
+        .unwrap();
+    println!(
+        "sending 1 USDC to the player's own address: {}",
+        signed.hash_hex()
+    );
+    chain.submit(&signed.envelope_xdr).await.unwrap();
+
+    let before = eschess_storage::stellar::user_wallet(pool, user, usdc)
+        .await
+        .unwrap();
+    for round in 1..=20 {
+        // Looking is scheduled; make it due now, as opening the deposit screen would.
+        wallets::touch_watch(pool, user).await.unwrap();
+        let stats = eschess_api::stellar_watcher::poll_wallets_once(
+            pool,
+            chain,
+            std::slice::from_ref(usdc),
+            wallets::WatchTiming::default(),
+        )
+        .await
+        .unwrap();
+        println!("watch round {round}: {stats:?}");
+        let have = eschess_storage::ledger::balance(pool, before)
+            .await
+            .unwrap()
+            .minor;
+        if have > 0 {
+            assert_eq!(have, 10_000_000, "exactly the 1 USDC that was sent");
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    panic!("the deposit was not credited");
 }

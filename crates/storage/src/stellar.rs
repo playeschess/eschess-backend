@@ -69,6 +69,16 @@ pub async fn deposit_id(pool: &PgPool, user: Uuid) -> Result<i64> {
     )
 }
 
+/// The player whose own wallet address this is, if it is one (ADR 0006).
+async fn user_for_own_address(pool: &PgPool, address: &str) -> Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar("SELECT user_id FROM user_wallet_keys WHERE address = $1")
+            .bind(address)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 async fn user_for_deposit_id(pool: &PgPool, id: i64) -> Result<Option<Uuid>> {
     Ok(
         sqlx::query_scalar("SELECT user_id FROM deposit_ids WHERE deposit_id = $1")
@@ -154,6 +164,9 @@ pub async fn handle_payment(
             "{} is not an asset deposits are accepted in",
             p.asset
         ))
+    } else if let Some(owner) = user_for_own_address(pool, &p.to).await? {
+        // Money sent to a player's own address belongs to that player, whatever memo or muxed id it carries.
+        Ok(owner)
     } else {
         match deposit_id_of(p) {
             Err(reason) => Err(reason),
