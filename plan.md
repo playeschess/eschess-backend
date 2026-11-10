@@ -91,11 +91,12 @@ Done when: a new user can receive testnet USDC on their own address and see the 
 
 ### Step 4. One-click staking on the contract
 
-Status: **in progress** (design accepted in `docs/adr/0007-staking-on-the-contract.md`).
+Status: **built and proven on the testnet** (design in `docs/adr/0007-staking-on-the-contract.md`). Staying on the testnet until the contract is audited.
 - Done: the `funding` state and the job that locks the stakes in the contract: it creates the match, tops a player's account up from the platform wallet if it is short, takes each player's deposit with their own key, then starts the game. A game that cannot be funded in two minutes is cancelled and the stakes returned. Proven on the real testnet (two new players, five transactions in one round, then the stakes returned).
 - Done: settling through the contract. The same rules decide who gets the pot (wait for fair play, a confirmed cheat pays the opponent, draws and short games return the stakes); the job tells the contract the outcome and the contract pays; only once the network shows the match closed does the ledger move the same pot. A match the network refunded returns both stakes in the ledger. Proven on the real testnet (the winner received the whole pot on the network and the ledger followed).
 - Done: the books-against-chain check counts what the contract holds (otherwise money locked in a stake would look missing and payouts would be halted by mistake). A game locking its stakes, or a transaction to the contract in the last three minutes, counts as money in motion. Proven on the real testnet: ledger 1.0 and network 1.0 with the stakes in the contract, and again after the pot was paid.
-- Next: the full end-to-end run (two players, a draw, a confirmed cheat), then deciding when to make the contract path the default.
+- Done: the full end-to-end run on the real testnet (`scripts/try-contract-staking.sh`): the real API, worker and the private fair-play worker, real USDC deposited to the players' own addresses, and the real contract. A win by checkmate (the contract pays the winner), a draw (each stake returned), and a long even-paced game that White won, which the scorer flagged for both players; a reviewer confirmed White's case and cleared Black's, and the pot went to Black. Every game settled once, the ledger and the network agreed after every payout, and at the end the contract held nothing.
+- Next: decide when the contract path becomes the default for staked games (a SQL change today), and the remaining items in step 7 (audit, a proper key service, legal review).
 
 1. Player picks an amount and presses Stake, or joins the queue with a stake.
 2. When two players are matched, our server creates the match on the contract and signs each player's deposit for them (we hold their keys).

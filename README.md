@@ -377,6 +377,15 @@ check): stakes locked in a match leave the players' accounts, so without the con
 ledger. A game that is locking its stakes, or any transaction to the contract in the last three minutes, counts as money in
 motion, so a difference seen while the accounts and the contract are read one after the other is only inconclusive.
 
+### Trying it end to end (testnet)
+
+`scripts/try-contract-staking.sh` starts the real API, worker and the private fair-play worker against a database of its own,
+signs up two players and a reviewer, deposits real testnet USDC to the players' own addresses, and plays three staked games
+through the real contract: a win, a draw, and a long even-paced game that fair play flags, where the reviewer confirms the
+winner's case and the pot goes to the other player. It then checks the ledger against the network after every payout. It needs
+the files and programs listed at the top of the script (all keys under `~/.eschess-testnet`, outside the repo, and
+`pip install chess` in the testnet venv) and `ESCROW_CONTRACT` set. Testnet only.
+
 ## Staked games (crates/storage, bins/worker) — testnet only
 
 A rated game can carry a stake from the list in `STAKES_USDC`. The creator's stake is held (wallet to a `stake_escrow`
