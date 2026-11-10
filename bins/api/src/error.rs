@@ -168,6 +168,11 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "insufficient_funds",
                 "your balance does not cover that stake".into(),
             ),
+            MoneyHalted => ApiError::Coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "staking_paused",
+                "staking is paused for a short while; please try again later".into(),
+            ),
             StakeNotOffered(why) => ApiError::Validation(why.to_string()),
             Ledger(e) => ApiError::internal(e),
             Refused(Refusal::NotAPlayer) => ApiError::NotFound,

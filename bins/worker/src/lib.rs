@@ -6,6 +6,7 @@
 
 pub mod expire;
 pub mod fairplay;
+pub mod reconcile;
 pub mod sender;
 pub mod settle;
 pub mod wallet_setup;

@@ -44,6 +44,8 @@ pub enum GameError {
     StakingRestricted,
     /// The wallet cannot cover the stake.
     InsufficientFunds,
+    /// New outflows are stopped because the books do not match the chain (a person is looking).
+    MoneyHalted,
     /// Staked games are not offered, or not at that amount, or not for that kind of game.
     StakeNotOffered(&'static str),
     /// The ledger refused a posting for a reason that is not the player's (a bug or a broken invariant).
@@ -76,6 +78,10 @@ impl fmt::Display for GameError {
             GameError::EmailNotConfirmed => write!(f, "confirm your email before staking money"),
             GameError::StakingRestricted => write!(f, "you cannot stake money right now"),
             GameError::InsufficientFunds => write!(f, "your balance does not cover that stake"),
+            GameError::MoneyHalted => write!(
+                f,
+                "staking is paused for a short while; please try again later"
+            ),
             GameError::StakeNotOffered(why) => write!(f, "{why}"),
             GameError::Ledger(e) => write!(f, "ledger error: {e}"),
             GameError::Database(e) => write!(f, "database error: {e}"),

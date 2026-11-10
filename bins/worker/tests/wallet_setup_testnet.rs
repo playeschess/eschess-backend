@@ -106,6 +106,7 @@ async fn the_worker_sets_up_a_brand_new_players_account_on_the_real_testnet(pool
 
     deposit_phase(&pool, &chain, user, &address, &usdc).await;
     withdraw_phase(&pool, &chain, vault.clone(), user, &address, &usdc).await;
+    check_phase(&pool, &chain, &funder, &usdc).await;
 }
 
 /// Sends 1 USDC from the account in EXTERNAL_SECRET_FILE to the player's address with our own payment code, then lets the
@@ -299,5 +300,34 @@ async fn withdraw_phase(
     );
     println!(
         "withdrew 0.5 USDC from the player's own account; 0.5 left on chain and in the ledger"
+    );
+}
+
+/// Runs the books-against-chain check against the real network. The funding account holds only XLM, so it stands in for
+/// the platform wallet here; the player's account is the only place USDC should be, and the ledger should agree.
+async fn check_phase(pool: &PgPool, chain: &HorizonChain, funder: &LocalSigner, usdc: &AssetId) {
+    use eschess_storage::reconcile::Verdict;
+    use eschess_worker::reconcile::{tick, ReconcileConfig};
+    let report = tick(
+        pool,
+        chain,
+        &ReconcileConfig {
+            hot_account: funder.public_key(),
+            assets: vec![usdc.clone()],
+            mismatches_to_halt: 3,
+        },
+    )
+    .await
+    .unwrap();
+    let c = &report.checks[0];
+    println!(
+        "books against chain: ledger {} / network {} (platform wallet {}, players {}) -> {:?}",
+        c.ledger_minor, c.chain_minor, c.hot_minor, c.players_minor, c.verdict
+    );
+    assert_eq!(c.verdict, Verdict::Ok);
+    assert_eq!(
+        (c.ledger_minor, c.chain_minor),
+        (5_000_000, 5_000_000),
+        "0.5 USDC on both sides"
     );
 }

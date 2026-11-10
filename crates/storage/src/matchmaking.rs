@@ -94,6 +94,7 @@ async fn pair_waiting(
                 Pair::Started(game) => game,
                 // A player who cannot stake any more (spent the money, was restricted since) leaves the queue; the
                 // other keeps waiting for someone else. Nothing was held for the pair.
+                Pair::Paused => continue,
                 Pair::Refused(who) => {
                     sqlx::query("DELETE FROM match_queue WHERE user_id = $1 AND game_id IS NULL")
                         .bind(who)
@@ -124,6 +125,8 @@ enum Pair {
     Started(Uuid),
     /// This player could not put up the stake, so no game was made.
     Refused(Uuid),
+    /// New stakes are paused (the books do not match the chain): nobody is dropped, the pair just waits.
+    Paused,
 }
 
 /// Starts the game for a pair and, for a staked pair, holds both stakes, all or nothing: in a savepoint, so a player who
@@ -163,6 +166,10 @@ async fn start_pair(
             ) => {
                 sp.rollback().await?;
                 return Ok(Pair::Refused(player));
+            }
+            Err(GameError::MoneyHalted) => {
+                sp.rollback().await?;
+                return Ok(Pair::Paused);
             }
             Err(other) => return Err(other),
         }

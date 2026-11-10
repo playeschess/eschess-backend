@@ -43,6 +43,7 @@ async fn main() {
     );
 
     spawn_wallet_setup(pool.clone(), chain.clone(), &stellar);
+    spawn_reconcile(pool.clone(), chain.clone(), &stellar);
 
     // Deposits need only the public address.
     eschess_api::stellar_watcher::spawn_watcher(pool.clone(), chain.clone(), stellar.clone());
@@ -133,6 +134,42 @@ fn spawn_expiry(pool: sqlx::PgPool) {
                 Err(e) => tracing::warn!("expiry round failed (will retry): {e}"),
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
+/// Compares the ledger with the network on a schedule (ADR 0006 §6): `RECONCILE_INTERVAL_SECS` (default 300, from 30).
+/// A persistent difference halts new withdrawals and staked games until a person clears it.
+fn spawn_reconcile(
+    pool: sqlx::PgPool,
+    chain: Arc<dyn eschess_stellar::Chain>,
+    stellar: &eschess_api::config::StellarConfig,
+) {
+    let get = |name: &str| std::env::var(name).ok();
+    let interval = get("RECONCILE_INTERVAL_SECS")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300)
+        .max(30);
+    let config = eschess_worker::reconcile::ReconcileConfig {
+        hot_account: stellar.hot_account,
+        assets: vec![stellar.usdc.clone()],
+        mismatches_to_halt: eschess_worker::reconcile::mismatches_to_halt(&get)
+            .expect("invalid RECONCILE_MISMATCHES_TO_HALT"),
+    };
+    tracing::info!(
+        "checking the ledger against the network every {interval} seconds; {} mismatches in a row halt new outflows",
+        config.mismatches_to_halt
+    );
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::reconcile::tick(&pool, &*chain, &config).await {
+                Ok(r) if r.halted => {
+                    tracing::error!("money halted by the books-against-chain check")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("books-against-chain check failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(interval)).await;
         }
     });
 }
