@@ -2,9 +2,10 @@
 //!
 //! Needs the network and testnet keys, so it is ignored by default. Run it with:
 //!   ESCROW_CONTRACT=C... ESCROW_TOKEN=C... ADMIN_SECRET_FILE=... PLAYER_A_SECRET_FILE=... PLAYER_B_SECRET_FILE=... \
-//!   cargo test -p eschess-stellar --test escrow_testnet -- --ignored --nocapture
+//!   cargo test -p eschess-stellar --features live-testnet --test escrow_testnet -- --ignored --nocapture
 //! The keys must be testnet keys (the signer refuses anything else), the admin must be the contract's current admin, and
 //! both players need a USDC trustline and a little USDC (the stake is 0.5).
+#![cfg(feature = "live-testnet")]
 
 use std::path::Path;
 use std::time::Duration;
