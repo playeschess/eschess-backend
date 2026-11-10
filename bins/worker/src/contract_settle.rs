@@ -19,7 +19,7 @@ use eschess_storage::contract::{self, Step};
 use eschess_storage::stakes::{self, ChainOutcome, Waiting};
 use uuid::Uuid;
 
-use crate::funding::{landed, read_match, run_call, FundingConfig, Parts};
+use crate::funding::{landed, read_match, run_call, FundingConfig, Note, Parts};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ContractSettleReport {
@@ -147,9 +147,11 @@ async fn settle_one(
                 parts,
                 config,
                 game,
-                Step::Settle,
-                None,
-                Some(verdict.outcome.as_str()),
+                Note {
+                    step: Step::Settle,
+                    player: None,
+                    detail: Some(verdict.outcome.as_str()),
+                },
                 parts.admin,
                 &call,
             )

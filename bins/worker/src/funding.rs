@@ -177,17 +177,28 @@ pub(crate) async fn read_match(
     }
 }
 
+/// What is recorded about a transaction with it: which step it is, whose it is, and a note.
+#[derive(Clone, Copy)]
+pub(crate) struct Note<'a> {
+    pub step: Step,
+    pub player: Option<Uuid>,
+    pub detail: Option<&'a str>,
+}
+
 /// Prepares, records, sends and waits for one contract call signed by `signer`.
 pub(crate) async fn run_call(
     parts: &Parts<'_>,
     config: &FundingConfig,
     game: Uuid,
-    step: Step,
-    player: Option<Uuid>,
-    detail: Option<&str>,
+    note: Note<'_>,
     signer: &dyn Signer,
     call: &ContractCall,
 ) -> Result<Resolved, String> {
+    let Note {
+        step,
+        player,
+        detail,
+    } = note;
     // A step that keeps failing is not retried forever: each try costs a fee. The game's time limit then cancels it.
     if contract::count_txs(parts.pool, game, step, player)
         .await
@@ -293,9 +304,11 @@ async fn fund_one(
             parts,
             config,
             game.id,
-            Step::Create,
-            None,
-            None,
+            Note {
+                step: Step::Create,
+                player: None,
+                detail: None,
+            },
             parts.admin,
             &call,
         )
@@ -335,9 +348,11 @@ async fn fund_one(
             parts,
             config,
             game.id,
-            Step::Deposit,
-            Some(player),
-            None,
+            Note {
+                step: Step::Deposit,
+                player: Some(player),
+                detail: None,
+            },
             &signer,
             &call,
         )
@@ -463,9 +478,11 @@ async fn cancel(
                 parts,
                 config,
                 game.id,
-                Step::Cancel,
-                None,
-                None,
+                Note {
+                    step: Step::Cancel,
+                    player: None,
+                    detail: None,
+                },
                 parts.admin,
                 &call,
             )

@@ -8,10 +8,9 @@ use eschess_domain::stellar::AccountKey;
 use eschess_ledger::Side;
 use eschess_storage::ledger::balance;
 use eschess_storage::stakes::ESCROW_KIND;
-use eschess_storage::stellar::{system_account, user_wallet};
+use eschess_storage::stellar::system_account;
 use eschess_worker::funding::FundingReport;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
