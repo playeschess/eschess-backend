@@ -91,7 +91,7 @@ Done when: a new user can receive testnet USDC on their own address and see the 
 
 ### Step 4. One-click staking on the contract
 
-Status: not started
+Status: **designed, waiting for your answers** (see `docs/adr/0007-staking-on-the-contract.md`)
 
 1. Player picks an amount and presses Stake, or joins the queue with a stake.
 2. When two players are matched, our server creates the match on the contract and signs each player's deposit for them (we hold their keys).
