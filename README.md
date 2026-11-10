@@ -313,6 +313,16 @@ repository has the plumbing, and a scorer that gives everyone 0.
 - The database refuses scores for non-players, changed or deleted scores, a second open case, reopening a decided case,
   adding a game to it, and deciding a case about yourself.
 
+## Players' own wallets (crates/stellar, crates/storage, bins/worker) — testnet only
+
+With `WALLET_MASTER_KEY_FILE` set, every new player gets a Stellar key of their own at signup, kept encrypted (AES-256-GCM,
+bound to the player and address) and opened only to sign. The first time a player asks how to deposit, the worker (with
+`WALLET_FUNDER_SECRET_FILE`, funding `WALLET_FUNDING_XLM`, default 2, from the platform's funding account) sets their
+account up on the network: it creates and funds it and adds the USDC trustline in one transaction, and
+`GET /v1/wallet/deposit-info` reports `own_wallet.status` (`setting_up` or `ready`). The player's own address is **not**
+offered as a place to send money yet: deposits are still credited through the shared platform address until the
+deposit watcher moves over (ADR 0006, `plan.md` step 3).
+
 ## The escrow contract from the backend (crates/stellar)
 
 `crates/stellar` can call the escrow contract in `eschess-contracts` (`soroban.rs`, `escrow.rs`): it builds the call,

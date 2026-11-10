@@ -40,7 +40,30 @@ pub async fn deposit_info(
         .await
         .map_err(ApiError::internal)?;
     let muxed = st.hot_account.muxed(id as u64).to_m();
+    // The first deposit intent is also the moment to set up the player's own account on the network (ADR 0006). Their
+    // own address is not offered as a place to send money yet: nothing watches it until deposits move over.
+    let own_wallet = match &state.vault {
+        None => None,
+        Some(vault) => {
+            let setup = async {
+                eschess_storage::wallets::ensure_wallet(&state.pool, &**vault, user.user_id)
+                    .await?;
+                eschess_storage::wallets::request_setup(&state.pool, user.user_id).await?;
+                eschess_storage::wallets::setup_state(&state.pool, user.user_id).await
+            }
+            .await;
+            match setup {
+                Ok(eschess_storage::wallets::SetupState::Ready) => Some("ready"),
+                Ok(_) => Some("setting_up"),
+                Err(e) => {
+                    tracing::warn!(user = %user.user_id, "could not request the player's wallet setup: {e}");
+                    None
+                }
+            }
+        }
+    };
     Ok(Json(json!({
+        "own_wallet": own_wallet.map(|status| json!({ "status": status })),
         "network": st.network,
         "asset": { "code": st.usdc.code(), "issuer": st.usdc.issuer(), "id": st.usdc.to_string() },
         "muxed_address": muxed,

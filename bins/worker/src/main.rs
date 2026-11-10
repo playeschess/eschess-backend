@@ -42,6 +42,8 @@ async fn main() {
             .expect("cannot build the Stellar client"),
     );
 
+    spawn_wallet_setup(pool.clone(), chain.clone(), &stellar);
+
     // Deposits need only the public address.
     eschess_api::stellar_watcher::spawn_watcher(pool.clone(), chain.clone(), stellar.clone());
 
@@ -110,6 +112,71 @@ fn spawn_expiry(pool: sqlx::PgPool) {
                 Err(e) => tracing::warn!("expiry round failed (will retry): {e}"),
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
+/// Sets players' own Stellar accounts up on the network (ADR 0006). Off unless both the master key that seals their keys
+/// (WALLET_MASTER_KEY_FILE) and the funding account's key (WALLET_FUNDER_SECRET_FILE) are given. Testnet only.
+fn spawn_wallet_setup(
+    pool: sqlx::PgPool,
+    chain: Arc<dyn eschess_stellar::Chain>,
+    stellar: &eschess_api::config::StellarConfig,
+) {
+    use eschess_stellar::custody::{KeyVault, LocalVault};
+    let get = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let (Some(master), Some(funder_file)) = (
+        get("WALLET_MASTER_KEY_FILE"),
+        get("WALLET_FUNDER_SECRET_FILE"),
+    ) else {
+        tracing::info!(
+            "WALLET_MASTER_KEY_FILE and WALLET_FUNDER_SECRET_FILE are not both set: players' own accounts will not be set up by this worker"
+        );
+        return;
+    };
+    let network = Network::parse(&stellar.network).expect("the network was checked by Config");
+    let vault: Arc<dyn KeyVault> = Arc::new(
+        LocalVault::from_file(std::path::Path::new(master.trim()), 1, network)
+            .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}")),
+    );
+    let funder = LocalSigner::from_file(std::path::Path::new(funder_file.trim()), network)
+        .expect("cannot load the funding account's key");
+    let config = eschess_worker::wallet_setup::SetupConfig {
+        network,
+        usdc: stellar.usdc.clone(),
+        starting_balance_stroops: eschess_worker::wallet_setup::funding_stroops(&|n| {
+            std::env::var(n).ok()
+        })
+        .expect("invalid WALLET_FUNDING_XLM"),
+        batch: 20,
+    };
+    tracing::info!(
+        "setting up players' own accounts, funded from {} with {} XLM each",
+        funder.public_key().to_g(),
+        config.starting_balance_stroops as f64 / 1e7
+    );
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::wallet_setup::tick(
+                &pool,
+                &*chain,
+                vault.clone(),
+                &funder,
+                &config,
+            )
+            .await
+            {
+                Ok(r) if r.ready + r.sent + r.failed > 0 => tracing::info!(
+                    "wallet setup: {} ready, {} sent, {} waiting, {} failed",
+                    r.ready,
+                    r.sent,
+                    r.waiting,
+                    r.failed
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("wallet setup round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
 }

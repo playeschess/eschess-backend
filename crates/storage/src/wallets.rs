@@ -115,3 +115,120 @@ pub async fn signer_for(
         sealed,
     )))
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Setting the account up on the network
+
+/// Asks for the user's account to be set up on the network. Does nothing if they have no wallet key, or already asked.
+/// Returns whether a new request was made.
+pub async fn request_setup(pool: &PgPool, user: Uuid) -> Result<bool, WalletError> {
+    Ok(sqlx::query(
+        "INSERT INTO wallet_setup (user_id) SELECT user_id FROM user_wallet_keys WHERE user_id = $1 \
+         ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0)
+}
+
+/// Where the user's account setup stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupState {
+    /// Nobody asked yet (or the user has no wallet key).
+    NotRequested,
+    /// Asked for; the worker has not finished.
+    SettingUp,
+    Ready,
+}
+
+pub async fn setup_state(pool: &PgPool, user: Uuid) -> Result<SetupState, WalletError> {
+    let row: Option<bool> =
+        sqlx::query_scalar("SELECT ready_at IS NOT NULL FROM wallet_setup WHERE user_id = $1")
+            .bind(user)
+            .fetch_optional(pool)
+            .await?;
+    Ok(match row {
+        None => SetupState::NotRequested,
+        Some(false) => SetupState::SettingUp,
+        Some(true) => SetupState::Ready,
+    })
+}
+
+/// An account waiting to be set up.
+#[derive(Debug, Clone)]
+pub struct PendingSetup {
+    pub user_id: Uuid,
+    pub address: AccountKey,
+    /// The last transaction sent for it and the time after which it can never land, if one was sent.
+    pub last_tx: Option<(String, i64)>,
+    pub attempts: i32,
+}
+
+/// Accounts asked for and not ready, oldest request first.
+pub async fn pending_setups(pool: &PgPool, limit: i64) -> Result<Vec<PendingSetup>, WalletError> {
+    let rows = sqlx::query(
+        "SELECT s.user_id, k.address, s.last_tx_hash, s.last_tx_max_time, s.attempts \
+         FROM wallet_setup s JOIN user_wallet_keys k ON k.user_id = s.user_id \
+         WHERE s.ready_at IS NULL ORDER BY s.requested_at, s.user_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            Ok(PendingSetup {
+                user_id: r.get("user_id"),
+                address: AccountKey::parse(&r.get::<String, _>("address"))
+                    .map_err(|e| WalletError::Corrupt(e.to_string()))?,
+                last_tx: r
+                    .get::<Option<String>, _>("last_tx_hash")
+                    .zip(r.get::<Option<i64>, _>("last_tx_max_time")),
+                attempts: r.get("attempts"),
+            })
+        })
+        .collect()
+}
+
+/// Records a transaction about to be sent, before it is sent, so that if the worker dies it is looked up, not rebuilt.
+pub async fn record_setup_tx(
+    pool: &PgPool,
+    user: Uuid,
+    hash_hex: &str,
+    max_time: i64,
+) -> Result<(), WalletError> {
+    sqlx::query(
+        "UPDATE wallet_setup SET last_tx_hash = $2, last_tx_max_time = $3, attempts = attempts + 1, \
+         updated_at = now() WHERE user_id = $1 AND ready_at IS NULL",
+    )
+    .bind(user)
+    .bind(hash_hex)
+    .bind(max_time)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_setup_error(pool: &PgPool, user: Uuid, error: &str) -> Result<(), WalletError> {
+    sqlx::query(
+        "UPDATE wallet_setup SET last_error = left($2, 500), updated_at = now() WHERE user_id = $1",
+    )
+    .bind(user)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The account exists on the network and can hold USDC.
+pub async fn mark_setup_ready(pool: &PgPool, user: Uuid) -> Result<(), WalletError> {
+    sqlx::query(
+        "UPDATE wallet_setup SET ready_at = now(), last_error = NULL, updated_at = now() \
+         WHERE user_id = $1 AND ready_at IS NULL",
+    )
+    .bind(user)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

@@ -8,5 +8,6 @@ pub mod expire;
 pub mod fairplay;
 pub mod sender;
 pub mod settle;
+pub mod wallet_setup;
 
 pub use sender::{SenderConfig, TickReport};

@@ -11,6 +11,7 @@
 //! testnet one for now); tests use a fake. Horizon is documented as eventually giving way to other APIs, and the trait
 //! is what lets that change without touching the rest of the platform.
 
+pub mod account_setup;
 pub mod custody;
 pub mod deposit;
 pub mod escrow;
