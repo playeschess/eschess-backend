@@ -73,7 +73,7 @@ Result: `crates/stellar/src/soroban.rs` (simulate, sign, send, wait; never signs
 
 ### Step 3. A wallet for every user
 
-Status: not started
+Status: **designed, waiting for your answers** (see `docs/adr/0006-user-wallets.md`)
 
 1. When someone signs up, create a Stellar account for them (we pay the small starting reserve and add the USDC trustline).
 2. Store their key encrypted, readable only by the server.
