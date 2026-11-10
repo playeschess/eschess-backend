@@ -53,6 +53,7 @@ impl Api {
             mailer: Arc::new(CapturingMailer::default()),
             hub: eschess_api::hub::Hub::new(),
             chain,
+            vault: None,
         };
         Api {
             app: app(state.clone()),
@@ -141,4 +142,24 @@ pub fn code(body: &Value) -> &str {
 
 pub fn id_of(body: &Value) -> Uuid {
     body["id"].as_str().unwrap().parse().unwrap()
+}
+
+impl Api {
+    /// With a master key for players' wallet keys (ADR 0006).
+    pub fn with_vault(pool: PgPool, vault: Arc<dyn eschess_stellar::custody::KeyVault>) -> Api {
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(Config::default()),
+            mailer: Arc::new(CapturingMailer::default()),
+            hub: eschess_api::hub::Hub::new(),
+            chain: None,
+            vault: Some(vault),
+        };
+        Api {
+            app: app(state.clone()),
+            pool,
+            state,
+            tasks: Default::default(),
+        }
+    }
 }

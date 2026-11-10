@@ -38,6 +38,7 @@ impl Api {
                 mailer: mailer.clone(),
                 hub: eschess_api::hub::Hub::new(),
                 chain: None,
+                vault: None,
             }),
             pool,
             mailer,

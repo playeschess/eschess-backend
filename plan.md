@@ -73,7 +73,9 @@ Result: `crates/stellar/src/soroban.rs` (simulate, sign, send, wait; never signs
 
 ### Step 3. A wallet for every user
 
-Status: **designed, waiting for your answers** (see `docs/adr/0006-user-wallets.md`)
+Status: **in progress** (design accepted in `docs/adr/0006-user-wallets.md`).
+- Done: the key vault and encrypted key store; every new user gets their own address at signup (testnet master key in a file).
+- Next: set the account up on the network at the first deposit intent, then move deposit watching and withdrawals to the users' own addresses, then the books-against-chain check.
 
 1. When someone signs up, create a Stellar account for them (we pay the small starting reserve and add the USDC trustline).
 2. Store their key encrypted, readable only by the server.

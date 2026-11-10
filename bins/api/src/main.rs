@@ -50,12 +50,33 @@ async fn main() {
                 .expect("cannot build the Stellar client"),
         ) as Arc<dyn eschess_stellar::Chain>
     });
+    // The master key that seals players' wallet keys, if one is configured (ADR 0006). A key file is for the testnet
+    // only; the public network needs a hardware-backed key service and is refused here.
+    let vault: Option<Arc<dyn eschess_stellar::custody::KeyVault>> =
+        config.wallet_master_key_file.as_ref().map(|path| {
+            let network = config
+                .stellar
+                .as_ref()
+                .and_then(|st| eschess_stellar::tx::Network::parse(&st.network))
+                .unwrap_or(eschess_stellar::tx::Network::Testnet);
+            let vault = eschess_stellar::custody::LocalVault::from_file(
+                std::path::Path::new(path),
+                1,
+                network,
+            )
+            .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}"));
+            Arc::new(vault) as Arc<dyn eschess_stellar::custody::KeyVault>
+        });
+    if vault.is_none() {
+        tracing::info!("WALLET_MASTER_KEY_FILE is not set: players get no wallet of their own yet");
+    }
     let state = AppState {
         pool,
         config: Arc::new(config),
         mailer,
         hub: eschess_api::hub::Hub::new(),
         chain,
+        vault,
     };
     // Listen for game changes made by any server, and push them to the players connected to this one.
     eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());
