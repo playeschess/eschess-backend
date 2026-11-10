@@ -1,6 +1,6 @@
 # ADR 0007 — Staked games on the escrow contract
 
-**Status:** Proposed · **Date:** 2026-11-10 · **Follows:** ADR 0004 (staked games), ADR 0006 (user wallets), the escrow
+**Status:** Accepted by the owner on 2026-11-10 (decisions below) · **Date:** 2026-11-10 · **Follows:** ADR 0004 (staked games), ADR 0006 (user wallets), the escrow
 contract in `eschess-contracts` (`docs/escrow-testnet.md`)
 
 ## Why
@@ -104,13 +104,13 @@ funding or settling as money in motion. A persistent difference halts new stakes
   keys, is the key-service requirement already in ADR 0006, and a multisig admin is a recommended step before real money.
 - **A removed trustline** makes a payout claimable instead of paid; the player has to claim it.
 
-## Decisions needed from the owner
+## Decisions (owner, 2026-11-10)
 
-1. **Wait for the stakes to be locked before the game starts** (recommended), or start at once and fund in the background?
-2. **Top up players' accounts automatically from the platform wallet** when their money is still there (recommended), or ask
-   those players to move it first?
-3. **Accept the 30-day limit** on a pot waiting for a fair-play decision, as described in §5?
-4. **Keep the ledger path as a switch** during the transition (recommended)?
+1. **Wait for the stakes to be locked before the game starts** (as recommended).
+2. **Top up players' accounts automatically from the platform wallet** when their money is still there (as recommended).
+3. **Accept the 30-day limit** on a pot waiting for a fair-play decision. Added by the owner's agreement: a fair-play case
+   must be decided within 14 days or it is escalated to a person, well before the contract's limit.
+4. **Keep the ledger path as a switch** during the transition (as recommended).
 
 ## Build order (after acceptance)
 

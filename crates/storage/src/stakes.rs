@@ -20,6 +20,46 @@ use crate::ledger::{self, LedgerStoreError};
 /// reference on its postings.
 pub const ESCROW_KIND: &str = "stake_escrow";
 
+/// Where a staked game's money lives (ADR 0007). A game remembers the path it was made on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StakePath {
+    /// The ledger alone holds the stakes (ADR 0004).
+    #[default]
+    Ledger,
+    /// The ledger holds them and the escrow contract holds them on the network (ADR 0007).
+    Contract,
+}
+
+impl StakePath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StakePath::Ledger => "ledger",
+            StakePath::Contract => "contract",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<StakePath> {
+        match s {
+            "ledger" => Some(StakePath::Ledger),
+            "contract" => Some(StakePath::Contract),
+            _ => None,
+        }
+    }
+}
+
+/// The path new staked games are made on, from the `stake_path` setting. An unreadable or unknown value means the
+/// ledger path: the contract path is only used when it is plainly asked for.
+pub async fn current_path(db: &mut PgConnection) -> Result<StakePath, sqlx::Error> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM platform_settings WHERE name = 'stake_path'")
+            .fetch_optional(&mut *db)
+            .await?;
+    Ok(value
+        .as_deref()
+        .and_then(StakePath::parse)
+        .unwrap_or_default())
+}
+
 /// What each player puts in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stake {
@@ -258,7 +298,7 @@ pub enum Waiting {
 /// Finished staked games that have not been settled, oldest first.
 pub async fn unsettled(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT id FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL AND status = 'finished' \
+        "SELECT id FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL AND status = 'finished' AND stake_path = 'ledger' \
          ORDER BY ended_at, id LIMIT $1",
     )
     .bind(limit)
@@ -290,7 +330,7 @@ pub async fn settle(
     }
     let Some(g) = sqlx::query(
         "SELECT white_id, black_id, result, ply, stake_minor, stake_asset FROM games \
-         WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL FOR UPDATE",
+         WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL AND stake_path = 'ledger' FOR UPDATE",
     )
     .bind(game)
     .fetch_optional(&mut *tx)
@@ -449,7 +489,7 @@ pub async fn escrow_mismatches(pool: &PgPool) -> Result<Vec<EscrowMismatch>, sql
     let rows = sqlx::query(
         "WITH expected AS ( \
              SELECT stake_asset AS asset, \
-                    SUM(CASE WHEN status = 'waiting' THEN stake_minor WHEN status IN ('active', 'finished') THEN 2 * stake_minor ELSE 0 END)::bigint AS minor \
+                    SUM(CASE WHEN status = 'waiting' THEN stake_minor WHEN status IN ('funding', 'active', 'finished') THEN 2 * stake_minor ELSE 0 END)::bigint AS minor \
              FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL GROUP BY stake_asset), \
          held AS ( \
              SELECT a.asset, SUM(COALESCE(b.balance_minor, 0))::bigint AS minor FROM ledger_accounts a \

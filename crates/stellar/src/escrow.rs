@@ -6,10 +6,32 @@
 //! contract can only ever pay the two players recorded at `create`. A match is identified by 16 bytes: we use the
 //! game's UUID.
 
+use eschess_domain::money::AssetId;
 use eschess_domain::stellar::{AccountKey, ContractId};
-use stellar_xdr::{ScAddress, ScMap, ScVal};
+use sha2::{Digest, Sha256};
+use stellar_xdr::{
+    ContractIdPreimage, Hash, HashIdPreimage, HashIdPreimageContractId, Limits, ScAddress, ScMap,
+    ScVal, WriteXdr,
+};
 
 use crate::soroban::{val, ContractCall};
+
+/// The address of the token contract for a classic asset (its "Stellar Asset Contract"), which the escrow takes as the
+/// match's token. It is derived from the asset and the network, so it is the same everywhere and nothing is configured:
+/// the same value `stellar contract id asset` prints.
+pub fn asset_contract_id(
+    network: crate::tx::Network,
+    asset: &AssetId,
+) -> Result<ContractId, String> {
+    let preimage = HashIdPreimage::ContractId(HashIdPreimageContractId {
+        network_id: Hash(network.id()),
+        contract_id_preimage: ContractIdPreimage::Asset(
+            crate::tx::asset(asset).map_err(|e| e.to_string())?,
+        ),
+    });
+    let bytes = preimage.to_xdr(Limits::none()).map_err(|e| e.to_string())?;
+    Ok(ContractId(Sha256::digest(bytes).into()))
+}
 
 /// How a match ended, as the contract takes it. `A` and `B` are the players in the order given to `create`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +311,26 @@ mod tests {
             entry("token", val::contract(&ContractId([3; 32]))),
         ];
         ScVal::Map(Some(ScMap(entries.try_into().unwrap())))
+    }
+
+    #[test]
+    fn the_usdc_token_contract_is_worked_out_from_the_asset() {
+        // The value `stellar contract id asset --asset USDC:GBBD47... --network testnet` printed on 2026-11-09.
+        let usdc = AssetId::credit(
+            "USDC",
+            "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+        )
+        .unwrap();
+        let id = asset_contract_id(crate::tx::Network::Testnet, &usdc).unwrap();
+        assert_eq!(
+            id.to_c(),
+            "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
+        );
+        // The network is part of it.
+        assert_ne!(
+            id,
+            asset_contract_id(crate::tx::Network::Public, &usdc).unwrap()
+        );
     }
 
     #[test]

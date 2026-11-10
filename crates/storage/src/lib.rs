@@ -1,5 +1,6 @@
 //! PostgreSQL is the system of record. Everything that touches it goes through this crate.
 
+pub mod contract;
 pub mod fairplay;
 pub mod games;
 pub mod identity;
