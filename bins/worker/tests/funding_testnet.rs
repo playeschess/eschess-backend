@@ -30,6 +30,7 @@ use eschess_storage::stellar::{system_account, user_wallet, CUSTODY_KIND};
 use eschess_storage::wallets::{self, SetupState};
 use eschess_worker::contract_settle;
 use eschess_worker::funding::{self, FundingConfig, Parts};
+use eschess_worker::reconcile::{self, ContractHolding, ReconcileConfig};
 use eschess_worker::wallet_setup::{self, SetupConfig};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -46,6 +47,37 @@ fn usdc() -> AssetId {
         "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
     )
     .unwrap()
+}
+
+/// The books-against-chain check against the real network. The funding account holds only XLM, so it stands in for the
+/// platform wallet; the players' accounts and the escrow contract are the only places USDC should be.
+async fn books_check(
+    pool: &PgPool,
+    chain: &HorizonChain,
+    funder: &LocalSigner,
+    escrow: &Escrow,
+    token: ContractId,
+    when: &str,
+) {
+    use eschess_storage::reconcile::Verdict;
+    let config = ReconcileConfig {
+        hot_account: funder.public_key(),
+        assets: vec![usdc()],
+        mismatches_to_halt: 3,
+        contract: Some(ContractHolding {
+            asset: usdc(),
+            token,
+            escrow: escrow.contract,
+            rpc: Arc::new(SorobanHttp::new("https://soroban-testnet.stellar.org").unwrap()),
+        }),
+    };
+    let report = reconcile::tick(pool, chain, &config).await.unwrap();
+    let c = &report.checks[0];
+    println!(
+        "books against chain {when}: ledger {} / network {} (players {}, contract {}) -> {:?}",
+        c.ledger_minor, c.chain_minor, c.players_minor, c.contract_minor, c.verdict
+    );
+    assert_eq!(c.verdict, Verdict::Ok, "{c:?}");
 }
 
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
@@ -224,6 +256,16 @@ async fn two_new_players_stakes_are_locked_in_the_real_contract(pool: PgPool) {
             0
         );
     }
+    // While the stakes sit in the contract, the books still match the network because the check counts the contract.
+    books_check(
+        &pool,
+        &chain,
+        &funder,
+        &escrow,
+        token,
+        "with the stakes locked",
+    )
+    .await;
     let txs: i64 = sqlx::query_scalar("SELECT count(*) FROM contract_txs WHERE game_id = $1")
         .bind(game)
         .fetch_one(&pool)
@@ -323,4 +365,13 @@ async fn two_new_players_stakes_are_locked_in_the_real_contract(pool: PgPool) {
         (ledger(players[0].0).await, ledger(players[1].0).await),
         (2 * STAKE, 0)
     );
+    books_check(
+        &pool,
+        &chain,
+        &funder,
+        &escrow,
+        token,
+        "after the pot was paid",
+    )
+    .await;
 }

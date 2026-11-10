@@ -84,6 +84,7 @@ fn world() -> World {
             hot_account: hot.public_key(),
             assets: vec![usdc()],
             mismatches_to_halt: 3,
+            contract: None,
         },
         hot,
     }
@@ -387,4 +388,116 @@ async fn history_is_kept_and_cannot_be_rewritten(pool: PgPool) {
     ] {
         assert!(sqlx::query(sql).execute(&pool).await.is_err(), "{sql}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The escrow contract's balance (ADR 0007 §7)
+
+/// A token contract that says the escrow holds a chosen amount.
+struct Token(Mutex<i64>);
+
+#[async_trait::async_trait]
+impl eschess_stellar::soroban::RpcSimulate for Token {
+    async fn simulate(
+        &self,
+        _: &str,
+    ) -> Result<eschess_stellar::soroban::Simulation, eschess_stellar::soroban::SorobanError> {
+        Ok(eschess_stellar::soroban::Simulation {
+            transaction_data: stellar_xdr::SorobanTransactionData::default(),
+            min_resource_fee: 1,
+            auth: vec![],
+            return_value: Some(eschess_stellar::soroban::val::i128(
+                *self.0.lock().unwrap() as i128
+            )),
+        })
+    }
+}
+
+fn with_contract(w: &World, held: i64) -> (ReconcileConfig, std::sync::Arc<Token>) {
+    let token = std::sync::Arc::new(Token(Mutex::new(held)));
+    let mut config = w.config.clone();
+    config.contract = Some(eschess_worker::reconcile::ContractHolding {
+        asset: usdc(),
+        token: eschess_domain::stellar::ContractId([3; 32]),
+        escrow: eschess_domain::stellar::ContractId([5; 32]),
+        rpc: token.clone(),
+    });
+    (config, token)
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn stakes_held_in_the_contract_count_as_money_the_network_holds(pool: PgPool) {
+    let w = world();
+    // Two players with 500 each in the ledger; 100 of each is locked in the contract, so their accounts hold 400 and the
+    // contract holds 200. The books balance only if the contract is counted.
+    player(&pool, &w, 500, 400).await;
+    player(&pool, &w, 500, 400).await;
+    let (config, _) = with_contract(&w, 200);
+    let r = tick(&pool, &w.net, &config).await.unwrap();
+    let c = &r.checks[0];
+    assert_eq!(
+        (
+            c.verdict,
+            c.ledger_minor,
+            c.chain_minor,
+            c.players_minor,
+            c.contract_minor
+        ),
+        (Verdict::Ok, 1_000, 1_000, 800, 200)
+    );
+
+    // Without reading the contract the same money would look missing: that is why the check has to include it.
+    let r = tick(&pool, &w.net, &w.config).await.unwrap();
+    assert_eq!(
+        (r.checks[0].verdict, r.checks[0].difference_minor),
+        (Verdict::Mismatch, -200)
+    );
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_difference_while_a_game_is_locking_its_stakes_proves_nothing_until_it_is_done(
+    pool: PgPool,
+) {
+    let w = world();
+    sqlx::query("UPDATE platform_settings SET value = 'contract' WHERE name = 'stake_path'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let a = player(&pool, &w, 500, 400).await;
+    let b = player(&pool, &w, 500, 400).await;
+    let stake = Stake {
+        asset: usdc(),
+        minor: 100,
+    };
+    let game = games::create_game(&pool, a, 300_000, 0, "white", true, Some(&stake))
+        .await
+        .unwrap();
+    games::join_game(&pool, game, b, true).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM games WHERE id = $1")
+            .bind(game)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "funding"
+    );
+
+    // Mid-funding the accounts and the contract are read one after the other and can disagree for a moment.
+    let (config, token) = with_contract(&w, 100); // only one deposit shows yet: 400 + 400 + 100 = 900 against 1000
+    let r = tick(&pool, &w.net, &config).await.unwrap();
+    assert_eq!(
+        (r.checks[0].verdict, r.checks[0].difference_minor),
+        (Verdict::Inconclusive, -100)
+    );
+
+    // Once the stakes are locked and the game is on, the same gap is a real mismatch.
+    games::activate_funded(&pool, game).await.unwrap();
+    let r = tick(&pool, &w.net, &config).await.unwrap();
+    assert_eq!(r.checks[0].verdict, Verdict::Mismatch);
+    // And it is fine again when the contract shows both deposits.
+    *token.0.lock().unwrap() = 200;
+    let r = tick(&pool, &w.net, &config).await.unwrap();
+    assert_eq!(r.checks[0].verdict, Verdict::Ok);
 }

@@ -33,6 +33,23 @@ pub fn asset_contract_id(
     Ok(ContractId(Sha256::digest(bytes).into()))
 }
 
+/// Read: how much of a token a contract holds (the token's `balance` for that address). Used to see what the escrow holds.
+pub fn token_balance(token: &ContractId, holder: &ContractId) -> ContractCall {
+    ContractCall {
+        contract: *token,
+        function: "balance".to_string(),
+        args: vec![val::contract(holder)],
+    }
+}
+
+/// An `i128` returned by a contract.
+pub fn i128_of(v: &ScVal) -> Result<i128, String> {
+    match v {
+        ScVal::I128(p) => Ok(((p.hi as i128) << 64) | p.lo as i128),
+        other => Err(format!("expected an i128, got {other:?}")),
+    }
+}
+
 /// How a match ended, as the contract takes it. `A` and `B` are the players in the order given to `create`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {

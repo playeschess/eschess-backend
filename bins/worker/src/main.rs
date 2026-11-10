@@ -151,11 +151,35 @@ fn spawn_reconcile(
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(300)
         .max(30);
+    // If an escrow contract is configured, what it holds is part of what the network holds.
+    let network = Network::parse(&stellar.network).expect("the network was checked by Config");
+    let contract = get("ESCROW_CONTRACT")
+        .filter(|v| !v.trim().is_empty())
+        .map(|c| {
+            let url = get("SOROBAN_RPC_URL")
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| match network {
+                    Network::Testnet => "https://soroban-testnet.stellar.org".to_string(),
+                    Network::Public => panic!("SOROBAN_RPC_URL must be set for the public network"),
+                });
+            eschess_worker::reconcile::ContractHolding {
+                asset: stellar.usdc.clone(),
+                token: eschess_stellar::escrow::asset_contract_id(network, &stellar.usdc)
+                    .expect("cannot work out the USDC token contract"),
+                escrow: eschess_domain::stellar::ContractId::parse(c.trim())
+                    .expect("ESCROW_CONTRACT is not a contract address"),
+                rpc: Arc::new(
+                    eschess_stellar::soroban::SorobanHttp::new(&url)
+                        .expect("cannot build the Soroban RPC client"),
+                ),
+            }
+        });
     let config = eschess_worker::reconcile::ReconcileConfig {
         hot_account: stellar.hot_account,
         assets: vec![stellar.usdc.clone()],
         mismatches_to_halt: eschess_worker::reconcile::mismatches_to_halt(&get)
             .expect("invalid RECONCILE_MISMATCHES_TO_HALT"),
+        contract,
     };
     tracing::info!(
         "checking the ledger against the network every {interval} seconds; {} mismatches in a row halt new outflows",

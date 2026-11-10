@@ -7,11 +7,35 @@
 //! withdrawals are not sent, staked games are not started or settled, deposits keep being credited. Nothing is repaired
 //! automatically: a difference might be a bug, a stolen key or a missed payment, and the cause decides the cure.
 
+use std::sync::Arc;
+
 use eschess_domain::money::AssetId;
-use eschess_domain::stellar::AccountKey;
+use eschess_domain::stellar::{AccountKey, ContractId};
+use eschess_stellar::escrow::{i128_of, token_balance};
+use eschess_stellar::soroban::{simulate, RpcSimulate};
 use eschess_stellar::Chain;
 use eschess_storage::reconcile::{self as store, Check, Reading, Verdict};
 use sqlx::PgPool;
+
+/// The escrow contract, whose token balance is part of what the network holds (ADR 0007 §7).
+#[derive(Clone)]
+pub struct ContractHolding {
+    /// The asset the contract holds (USDC).
+    pub asset: AssetId,
+    /// The asset's token contract, asked for the escrow's balance.
+    pub token: ContractId,
+    pub escrow: ContractId,
+    pub rpc: Arc<dyn RpcSimulate>,
+}
+
+impl std::fmt::Debug for ContractHolding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContractHolding")
+            .field("asset", &self.asset)
+            .field("escrow", &self.escrow.to_c())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ReconcileConfig {
@@ -21,6 +45,8 @@ pub struct ReconcileConfig {
     pub assets: Vec<AssetId>,
     /// How many conclusive mismatches in a row start a halt.
     pub mismatches_to_halt: i64,
+    /// The escrow contract, if staked games use one. Without it money in a contract would look missing.
+    pub contract: Option<ContractHolding>,
 }
 
 /// `RECONCILE_MISMATCHES_TO_HALT` (default 3, from 2 to 20).
@@ -102,6 +128,26 @@ pub async fn tick(
                 .map_err(|e| e.to_string())?
                 .map_or(0, |a| a.balance_of(asset));
         }
+        // What the escrow contract holds: the stakes of games being played on the contract path.
+        let mut contract = 0i64;
+        if let Some(c) = config.contract.as_ref().filter(|c| c.asset == *asset) {
+            let sequence = chain
+                .account(&config.hot_account.to_g())
+                .await
+                .map_err(|e| e.to_string())?
+                .map_or(1, |a| a.sequence + 1);
+            let sim = simulate(
+                &*c.rpc,
+                &config.hot_account,
+                sequence,
+                &token_balance(&c.token, &c.escrow),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let value = sim.return_value.ok_or("the token returned no balance")?;
+            contract = i64::try_from(i128_of(&value)?)
+                .map_err(|_| "the contract's balance does not fit")?;
+        }
         let motion_after = store::money_in_motion(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -113,6 +159,7 @@ pub async fn tick(
                 ledger,
                 hot,
                 players,
+                contract,
                 explained,
                 in_motion: motion_before || motion_after,
                 accounts_read: addresses.len() as i32 + 1,
