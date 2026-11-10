@@ -101,6 +101,9 @@ pub struct TickReport {
     pub still_waiting: usize,
     /// The withdrawal a new transaction was sent for.
     pub sent: Option<Uuid>,
+    /// New sending is stopped because the books do not match the chain (see `reconcile`). In-flight attempts are still
+    /// resolved.
+    pub halted: bool,
 }
 
 /// Lets the sender pay from players' own accounts (ADR 0006): the vault that opens their keys.
@@ -153,7 +156,14 @@ pub async fn tick_with(
     let mut report = TickReport::default();
     resolve(pool, chain, config, &mut report).await?;
     repair_failed(pool).await?;
-    if report.still_waiting == 0 {
+    if eschess_storage::reconcile::active_halt(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        // Attempts already in flight were resolved above; nothing new leaves until a person clears the halt.
+        report.halted = true;
+    } else if report.still_waiting == 0 {
         if let Some(w) = next_to_send(pool).await? {
             send(pool, chain, signer, config, own, &w, now, &mut report).await?;
         }

@@ -295,7 +295,7 @@ pub async fn cancel(
 }
 
 /// An approver, or "not found" for anyone else: the admin routes do not announce themselves.
-async fn approver(state: &AppState, user: &AuthUser) -> Result<(), ApiError> {
+pub(crate) async fn approver(state: &AppState, user: &AuthUser) -> Result<(), ApiError> {
     if !withdrawals::has_role(&state.pool, user.user_id, APPROVER_ROLE).await? {
         return Err(ApiError::NotFound);
     }

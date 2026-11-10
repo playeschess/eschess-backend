@@ -3,6 +3,7 @@ pub mod fairplay;
 pub mod games;
 pub mod matchmaking;
 pub mod me;
+pub mod money;
 pub mod ratings;
 pub mod wallet;
 pub mod withdrawals;

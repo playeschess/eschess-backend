@@ -60,6 +60,14 @@ fn ledger_err(e: LedgerStoreError) -> GameError {
 /// Refuses a player who may not stake (ADR 0004 §2): an unconfirmed email, an open fair-play case, a suspension or a
 /// closure. Checked inside the transaction that takes the stake. Their balance is checked by the hold itself.
 pub async fn require_can_stake(tx: &mut PgConnection, player: Uuid) -> Result<(), GameError> {
+    // While the books do not match the chain, no new stake is taken (see `reconcile`).
+    let halted: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM money_halts WHERE cleared_at IS NULL)")
+            .fetch_one(&mut *tx)
+            .await?;
+    if halted {
+        return Err(GameError::MoneyHalted);
+    }
     let confirmed: Option<bool> =
         sqlx::query_scalar("SELECT email_verified_at IS NOT NULL FROM users WHERE id = $1")
             .bind(player)
@@ -243,6 +251,8 @@ pub enum Waiting {
     OpenCase,
     /// Not a finished, staked, unsettled game (already settled by someone else, say).
     NothingToDo,
+    /// New outflows are stopped because the books do not match the chain; pots wait.
+    Halted,
 }
 
 /// Finished staked games that have not been settled, oldest first.
@@ -271,6 +281,13 @@ pub async fn settle(
 ) -> Result<Result<Settled, Waiting>, GameError> {
     let fee_bps = fee_bps.min(MAX_FEE_BPS) as i64;
     let mut tx = pool.begin().await?;
+    let halted: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM money_halts WHERE cleared_at IS NULL)")
+            .fetch_one(&mut *tx)
+            .await?;
+    if halted {
+        return Ok(Err(Waiting::Halted));
+    }
     let Some(g) = sqlx::query(
         "SELECT white_id, black_id, result, ply, stake_minor, stake_asset FROM games \
          WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL FOR UPDATE",

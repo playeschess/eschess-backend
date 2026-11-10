@@ -332,6 +332,18 @@ of their own, or a player without one) it is paid from the platform's hot wallet
 as one pool, so either way it settles the same; the limits, approvals and the hold during a fair-play case are unchanged.
 The player's account pays the network fee (a fraction of a cent of XLM) until fees are paid by the platform.
 
+## The books-against-chain check (crates/storage, bins/worker, bins/api) — testnet only
+
+Money is spread over many accounts, so the worker regularly (every `RECONCILE_INTERVAL_SECS`, default 300) compares what
+the ledger says the platform holds with what the network says is there: the platform wallet plus every player's own
+account. Every comparison is kept in `money_checks`. Money the ledger knows is on the network but not credited (deposits
+set aside for review) is explained, not a difference. A difference while a withdrawal is being sent or a deposit is being
+credited proves nothing and is called inconclusive. A difference with nothing in motion is a **mismatch**, and
+`RECONCILE_MISMATCHES_TO_HALT` (default 3) in a row **halt new outflows**: withdrawals are not sent, staked games are not
+started or settled and queued stakes wait (deposits are still credited, unstaked play and cancelling carry on). Nothing is
+repaired automatically. People with the `withdrawal_approver` role see the latest comparison and any halt at
+`GET /v1/admin/money`, and end a halt, with a written note that is kept, at `POST /v1/admin/money/halt/clear`.
+
 ## The escrow contract from the backend (crates/stellar)
 
 `crates/stellar` can call the escrow contract in `eschess-contracts` (`soroban.rs`, `escrow.rs`): it builds the call,

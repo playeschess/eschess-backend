@@ -136,7 +136,9 @@ pub async fn tick(pool: &PgPool, config: &SettleConfig) -> Result<SettleReport, 
                 tracing::info!(%game, %to, "staked game settled: pot to the opponent of a confirmed cheat");
                 report.confiscated += 1;
             }
-            Ok(Err(Waiting::NotScored | Waiting::OpenCase)) => report.waiting += 1,
+            Ok(Err(Waiting::NotScored | Waiting::OpenCase | Waiting::Halted)) => {
+                report.waiting += 1
+            }
             Ok(Err(Waiting::NothingToDo)) => {}
             Err(e) => {
                 tracing::error!(%game, "settling a staked game failed (will retry): {e}");

@@ -125,6 +125,8 @@ pub fn app(state: AppState) -> Router {
             "/v1/admin/fairplay/appeals/{id}/uphold",
             post(routes::fairplay::uphold_appeal),
         )
+        .route("/v1/admin/money", get(routes::money::status))
+        .route("/v1/admin/money/halt/clear", post(routes::money::clear))
         .route("/v1/leaderboard", get(routes::ratings::leaderboard))
         .route("/v1/ws", get(ws::upgrade))
         .route(

@@ -6,6 +6,7 @@ pub mod identity;
 pub mod ledger;
 pub mod matchmaking;
 pub mod ratings;
+pub mod reconcile;
 pub mod stakes;
 pub mod stellar;
 pub mod wallets;
