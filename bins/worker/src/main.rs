@@ -294,6 +294,25 @@ fn spawn_funding(
         tx_wait: Duration::from_secs(25),
         batch: 10,
     };
+    // Settling contract games needs the fair-play scorer to wait for (the same SETTLE_SCORER as the ledger path) and no fee:
+    // the contract pays the winner the whole pot (ADR 0007 §5).
+    let settle_scorer = match eschess_worker::settle::SettleConfig::from_lookup(&|n| {
+        std::env::var(n).ok()
+    })
+    .expect("invalid settlement settings")
+    {
+        Some(c) if c.fee_bps > 0 => {
+            tracing::error!(
+                "STAKE_FEE_BPS is set, but the contract takes no fee: staked games on the contract will NOT be settled until it is 0"
+            );
+            None
+        }
+        Some(c) => Some((c.scorer, c.batch)),
+        None => {
+            tracing::info!("SETTLE_SCORER is not set: finished games on the contract will not be settled by this worker");
+            None
+        }
+    };
     tracing::info!(
         "locking stakes in the escrow contract {} (admin {})",
         contract.trim(),
@@ -311,6 +330,18 @@ fn spawn_funding(
                     .as_ref()
                     .map(|h| h as &dyn eschess_stellar::signer::Signer),
             };
+            if let Some((scorer, batch)) = &settle_scorer {
+                match eschess_worker::contract_settle::tick(&parts, &config, scorer, *batch).await {
+                    Ok(r) if r.settled + r.sent + r.failed > 0 => {
+                        tracing::info!(
+                        "contract settle: {} settled, {} told the contract, {} waiting, {} failed",
+                        r.settled, r.sent, r.waiting, r.failed
+                    )
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("contract settle round failed (will retry): {e}"),
+                }
+            }
             match eschess_worker::funding::tick(&parts, &config).await {
                 Ok(r) if r.activated + r.cancelled + r.sent + r.failed > 0 => tracing::info!(
                     "funding: {} started, {} cancelled, {} transactions, {} waiting, {} failed",

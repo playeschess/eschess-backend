@@ -144,7 +144,7 @@ fn match_id(game: Uuid) -> [u8; 16] {
 }
 
 /// The game's match as the contract has it, or `None` if it was never created.
-async fn read_match(
+pub(crate) async fn read_match(
     parts: &Parts<'_>,
     config: &FundingConfig,
     game: Uuid,
@@ -177,16 +177,28 @@ async fn read_match(
     }
 }
 
+/// What is recorded about a transaction with it: which step it is, whose it is, and a note.
+#[derive(Clone, Copy)]
+pub(crate) struct Note<'a> {
+    pub step: Step,
+    pub player: Option<Uuid>,
+    pub detail: Option<&'a str>,
+}
+
 /// Prepares, records, sends and waits for one contract call signed by `signer`.
-async fn run_call(
+pub(crate) async fn run_call(
     parts: &Parts<'_>,
     config: &FundingConfig,
     game: Uuid,
-    step: Step,
-    player: Option<Uuid>,
+    note: Note<'_>,
     signer: &dyn Signer,
     call: &ContractCall,
 ) -> Result<Resolved, String> {
+    let Note {
+        step,
+        player,
+        detail,
+    } = note;
     // A step that keeps failing is not retried forever: each try costs a fee. The game's time limit then cancels it.
     if contract::count_txs(parts.pool, game, step, player)
         .await
@@ -219,13 +231,14 @@ async fn run_call(
     .await
     .map_err(|e| e.to_string())?;
     // Recorded before it is sent: if we die now, the next round finds this hash instead of building another.
-    contract::record_tx(
+    contract::record_tx_with(
         parts.pool,
         game,
         step,
         player,
         &prepared.signed.hash_hex(),
         max_time as i64,
+        detail,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -291,8 +304,11 @@ async fn fund_one(
             parts,
             config,
             game.id,
-            Step::Create,
-            None,
+            Note {
+                step: Step::Create,
+                player: None,
+                detail: None,
+            },
             parts.admin,
             &call,
         )
@@ -332,8 +348,11 @@ async fn fund_one(
             parts,
             config,
             game.id,
-            Step::Deposit,
-            Some(player),
+            Note {
+                step: Step::Deposit,
+                player: Some(player),
+                detail: None,
+            },
             &signer,
             &call,
         )
@@ -359,7 +378,7 @@ async fn addr(parts: &Parts<'_>, user: Uuid) -> Result<AccountKey, String> {
 
 /// Did a recorded transaction land (or fail in a ledger)? Contract calls are looked up on the RPC server, payments on
 /// Horizon.
-async fn landed(parts: &Parts<'_>, hash: &str, step: Step) -> Result<bool, String> {
+pub(crate) async fn landed(parts: &Parts<'_>, hash: &str, step: Step) -> Result<bool, String> {
     match step {
         Step::TopUp => Ok(parts
             .chain
@@ -459,8 +478,11 @@ async fn cancel(
                 parts,
                 config,
                 game.id,
-                Step::Cancel,
-                None,
+                Note {
+                    step: Step::Cancel,
+                    player: None,
+                    detail: None,
+                },
                 parts.admin,
                 &call,
             )

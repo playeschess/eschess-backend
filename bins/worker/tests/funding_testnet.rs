@@ -20,7 +20,7 @@ use eschess_stellar::custody::{KeyVault, LocalVault};
 use eschess_stellar::escrow::{asset_contract_id, parse_match, Escrow, MatchStatus};
 use eschess_stellar::horizon::HorizonChain;
 use eschess_stellar::signer::{LocalSigner, Signer};
-use eschess_stellar::soroban::{prepare, send_and_wait, simulate, Resolved, SorobanHttp};
+use eschess_stellar::soroban::{simulate, SorobanHttp};
 use eschess_stellar::tx::Network;
 use eschess_stellar::Chain;
 use eschess_storage::games;
@@ -28,6 +28,7 @@ use eschess_storage::ledger::post;
 use eschess_storage::stakes::Stake;
 use eschess_storage::stellar::{system_account, user_wallet, CUSTODY_KIND};
 use eschess_storage::wallets::{self, SetupState};
+use eschess_worker::contract_settle;
 use eschess_worker::funding::{self, FundingConfig, Parts};
 use eschess_worker::wallet_setup::{self, SetupConfig};
 use sqlx::PgPool;
@@ -230,46 +231,96 @@ async fn two_new_players_stakes_are_locked_in_the_real_contract(pool: PgPool) {
         .unwrap();
     println!("{txs} transactions were recorded for the game");
 
-    // Tidy up the testnet: return the stakes with our own client (the game is not going to be played).
-    let admin_seq = chain
-        .account(&admin.public_key().to_g())
+    // The game is played out (White wins), fair play has looked at it, and the job settles it through the contract.
+    sqlx::query("UPDATE games SET status = 'finished', result = 'white', ply = 40, ended_at = now() WHERE id = $1")
+        .bind(game).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO fairplay_runs (game_id, scorer, outcome) VALUES ($1, 'baseline-1', 'scored')",
+    )
+    .bind(game)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for round in 1..=12 {
+        let parts = Parts {
+            pool: &pool,
+            rpc: &rpc,
+            chain: &chain,
+            vault: vault.clone(),
+            admin: &admin,
+            hot: Some(&hot),
+        };
+        let r = contract_settle::tick(&parts, &config, "baseline-1", 5)
+            .await
+            .unwrap();
+        println!("settle round {round}: {r:?}");
+        let done: bool =
+            sqlx::query_scalar("SELECT settled_at IS NOT NULL FROM games WHERE id = $1")
+                .bind(game)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let done: bool = sqlx::query_scalar("SELECT settled_at IS NOT NULL FROM games WHERE id = $1")
+        .bind(game)
+        .fetch_one(&pool)
         .await
-        .unwrap()
-        .unwrap()
-        .sequence
-        + 1;
-    let now = chain.latest_ledger_close_time().await.unwrap() as u64;
-    let prepared = prepare(
+        .unwrap();
+    assert!(done, "the game was settled");
+
+    // The network agrees: the match is settled, the winner holds the whole pot, the loser holds nothing, and the
+    // contract holds neither stake any more.
+    let sim = simulate(
         &rpc,
-        network,
-        &admin,
-        &escrow.cancel(*game.as_bytes()),
-        admin_seq,
-        now + 120,
+        &admin.public_key(),
+        chain
+            .account(&admin.public_key().to_g())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence
+            + 1,
+        &escrow.get_match(*game.as_bytes()),
     )
     .await
     .unwrap();
-    assert!(matches!(
-        send_and_wait(
-            &rpc,
-            &prepared,
-            Duration::from_secs(40),
-            Duration::from_secs(2)
-        )
+    assert_eq!(
+        parse_match(&sim.return_value.unwrap()).unwrap().status,
+        MatchStatus::Settled
+    );
+    let winner = chain
+        .account(&players[0].1.to_g())
         .await
-        .unwrap(),
-        Resolved::Success { .. }
-    ));
-    for (_, a) in &players {
-        assert_eq!(
-            chain
-                .account(&a.to_g())
+        .unwrap()
+        .unwrap()
+        .balance_of(&usdc());
+    let loser = chain
+        .account(&players[1].1.to_g())
+        .await
+        .unwrap()
+        .unwrap()
+        .balance_of(&usdc());
+    println!(
+        "on the network: winner {winner}, loser {loser} (the pot was {})",
+        2 * STAKE
+    );
+    assert_eq!((winner, loser), (2 * STAKE, 0));
+    // The ledger moved the same pot, after the network had paid.
+    let ledger = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            eschess_storage::ledger::balance(&pool, user_wallet(&pool, id, &usdc()).await.unwrap())
                 .await
                 .unwrap()
-                .unwrap()
-                .balance_of(&usdc()),
-            STAKE,
-            "the stake came back"
-        );
-    }
+                .minor
+        }
+    };
+    assert_eq!(
+        (ledger(players[0].0).await, ledger(players[1].0).await),
+        (2 * STAKE, 0)
+    );
 }
