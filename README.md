@@ -364,7 +364,13 @@ starts the game. It reads the contract every round and does only the next missin
 sending it, waits for one that may still land instead of building another, and gives a failing step four tries. A game still
 funding after two minutes is cancelled (the match too, which returns any deposit) and the ledger holds are released.
 Needs `ESCROW_CONTRACT`, `ESCROW_ADMIN_SECRET_FILE` and `WALLET_MASTER_KEY_FILE` on the worker (see `.env.example`).
-Settling a contract game through the contract is the next piece; until then the ledger settle job leaves them alone.
+Finished contract games are settled by a second step of the same worker loop (needs `SETTLE_SCORER`, and `STAKE_FEE_BPS`
+must be 0 because the contract pays the winner the whole pot): the same rules decide who gets the pot as on the ledger path
+(wait for fair play and for no open case; a confirmed cheat pays the opponent; draws and very short games return the stakes),
+the contract is told the outcome (recorded with the transaction, before it is sent) and pays, and only once the network shows
+the match closed does the ledger move the same pot. If the worker dies in between, the next round posts the ledger move from
+what the network was told, never from a fresh decision. A match the network refunded returns both stakes in the ledger. The
+ledger settle job leaves contract games alone, and a halt from the books-against-chain check stops payouts on both paths.
 
 ## Staked games (crates/storage, bins/worker) — testnet only
 

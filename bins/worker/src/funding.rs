@@ -144,7 +144,7 @@ fn match_id(game: Uuid) -> [u8; 16] {
 }
 
 /// The game's match as the contract has it, or `None` if it was never created.
-async fn read_match(
+pub(crate) async fn read_match(
     parts: &Parts<'_>,
     config: &FundingConfig,
     game: Uuid,
@@ -178,12 +178,13 @@ async fn read_match(
 }
 
 /// Prepares, records, sends and waits for one contract call signed by `signer`.
-async fn run_call(
+pub(crate) async fn run_call(
     parts: &Parts<'_>,
     config: &FundingConfig,
     game: Uuid,
     step: Step,
     player: Option<Uuid>,
+    detail: Option<&str>,
     signer: &dyn Signer,
     call: &ContractCall,
 ) -> Result<Resolved, String> {
@@ -219,13 +220,14 @@ async fn run_call(
     .await
     .map_err(|e| e.to_string())?;
     // Recorded before it is sent: if we die now, the next round finds this hash instead of building another.
-    contract::record_tx(
+    contract::record_tx_with(
         parts.pool,
         game,
         step,
         player,
         &prepared.signed.hash_hex(),
         max_time as i64,
+        detail,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -293,6 +295,7 @@ async fn fund_one(
             game.id,
             Step::Create,
             None,
+            None,
             parts.admin,
             &call,
         )
@@ -334,6 +337,7 @@ async fn fund_one(
             game.id,
             Step::Deposit,
             Some(player),
+            None,
             &signer,
             &call,
         )
@@ -359,7 +363,7 @@ async fn addr(parts: &Parts<'_>, user: Uuid) -> Result<AccountKey, String> {
 
 /// Did a recorded transaction land (or fail in a ledger)? Contract calls are looked up on the RPC server, payments on
 /// Horizon.
-async fn landed(parts: &Parts<'_>, hash: &str, step: Step) -> Result<bool, String> {
+pub(crate) async fn landed(parts: &Parts<'_>, hash: &str, step: Step) -> Result<bool, String> {
     match step {
         Step::TopUp => Ok(parts
             .chain
@@ -460,6 +464,7 @@ async fn cancel(
                 config,
                 game.id,
                 Step::Cancel,
+                None,
                 None,
                 parts.admin,
                 &call,

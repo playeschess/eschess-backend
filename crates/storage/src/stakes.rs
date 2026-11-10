@@ -319,13 +319,8 @@ pub async fn settle(
     scorer: &str,
     fee_bps: u32,
 ) -> Result<Result<Settled, Waiting>, GameError> {
-    let fee_bps = fee_bps.min(MAX_FEE_BPS) as i64;
     let mut tx = pool.begin().await?;
-    let halted: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM money_halts WHERE cleared_at IS NULL)")
-            .fetch_one(&mut *tx)
-            .await?;
-    if halted {
+    if halted(&mut tx).await? {
         return Ok(Err(Waiting::Halted));
     }
     let Some(g) = sqlx::query(
@@ -338,17 +333,66 @@ pub async fn settle(
     else {
         return Ok(Err(Waiting::NothingToDo));
     };
-    let (white, black): (Uuid, Uuid) = (g.get("white_id"), g.get("black_id"));
-    let result: String = g.get("result");
-    let ply: i32 = g.get("ply");
-    let Some(stake) = stake_of(
-        g.get("stake_minor"),
-        g.get::<Option<String>, _>("stake_asset").as_deref(),
-    )?
-    else {
+    let Some(row) = FinishedRow::read(&g)? else {
         return Ok(Err(Waiting::NothingToDo));
     };
+    let verdict = match decide(&mut tx, game, &row, scorer).await? {
+        Ok(v) => v,
+        Err(w) => return Ok(Err(w)),
+    };
+    let settled = post_pot(&mut tx, game, &row, &verdict, fee_bps).await?;
+    tx.commit()
+        .await
+        .map_err(|e| ledger_err(LedgerStoreError::from(e)))?;
+    Ok(Ok(settled))
+}
 
+/// Whether new outflows are stopped because the books do not match the chain.
+async fn halted(tx: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM money_halts WHERE cleared_at IS NULL)")
+        .fetch_one(&mut *tx)
+        .await
+}
+
+/// A finished staked game, as the settle rules read it.
+struct FinishedRow {
+    white: Uuid,
+    black: Uuid,
+    result: String,
+    ply: i32,
+    stake: Stake,
+}
+
+impl FinishedRow {
+    fn read(g: &sqlx::postgres::PgRow) -> Result<Option<FinishedRow>, GameError> {
+        let Some(stake) = stake_of(
+            g.get("stake_minor"),
+            g.get::<Option<String>, _>("stake_asset").as_deref(),
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(FinishedRow {
+            white: g.get("white_id"),
+            black: g.get("black_id"),
+            result: g.get("result"),
+            ply: g.get("ply"),
+            stake,
+        }))
+    }
+}
+
+/// Who deserves the pot (ADR 0004 §5), or why that cannot be said yet. The same rules whichever path holds the money.
+/// Waits until `scorer` has finished with the game and neither player has an open case; then a case confirmed against
+/// exactly one player pays the other the whole pot, both confirmed returns both stakes, and otherwise a draw or a game that
+/// ended before each side had made two moves returns the stakes, and the winner takes the pot.
+async fn decide(
+    tx: &mut PgConnection,
+    game: Uuid,
+    row: &FinishedRow,
+    scorer: &str,
+) -> Result<Result<Settled, Waiting>, GameError> {
+    let (white, black) = (row.white, row.black);
     let scored: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM fairplay_runs WHERE game_id = $1 AND scorer = $2)",
     )
@@ -379,17 +423,44 @@ pub async fn settle(
     };
     let white_cheated = confirmed(white).fetch_one(&mut *tx).await?;
     let black_cheated = confirmed(black).fetch_one(&mut *tx).await?;
+    Ok(Ok(match (white_cheated, black_cheated) {
+        (true, true) => Settled::Returned,
+        (true, false) => Settled::Confiscated { to: black },
+        (false, true) => Settled::Confiscated { to: white },
+        (false, false) => match row.result.as_str() {
+            "white" if row.ply >= crate::ratings::MIN_PLIES_FOR_RATING => Settled::Paid {
+                winner: white,
+                fee_minor: 0,
+            },
+            "black" if row.ply >= crate::ratings::MIN_PLIES_FOR_RATING => Settled::Paid {
+                winner: black,
+                fee_minor: 0,
+            },
+            _ => Settled::Returned,
+        },
+    }))
+}
 
+/// Moves the pot in the ledger as `verdict` says (the fee, if any, comes out of a decisive pot only), marks the game
+/// settled, in the caller's transaction. One posting per game, keyed by the game, so a repeat is refused.
+async fn post_pot(
+    tx: &mut PgConnection,
+    game: Uuid,
+    row: &FinishedRow,
+    verdict: &Settled,
+    fee_bps: u32,
+) -> Result<Settled, GameError> {
+    let fee_bps = fee_bps.min(MAX_FEE_BPS) as i64;
+    let stake = &row.stake;
     let pot = stake
         .minor
         .checked_mul(2)
         .ok_or_else(|| GameError::Ledger("pot overflow".into()))?;
-    let escrow = account(&mut tx, ESCROW_KIND, &stake.asset, None, Side::Credit).await?;
+    let escrow = account(tx, ESCROW_KIND, &stake.asset, None, Side::Credit).await?;
     let amount = |minor: i64| {
         Amount::new(minor, stake.asset.clone()).map_err(|e| GameError::Ledger(e.to_string()))
     };
     let mut entries = vec![Entry::debit(escrow, amount(pot)?)];
-    let settled;
     let credit = |entries: &mut Vec<Entry>, acct: AccountId, minor: i64| -> Result<(), GameError> {
         if minor > 0 {
             entries.push(Entry::credit(acct, amount(minor)?));
@@ -397,79 +468,203 @@ pub async fn settle(
         Ok(())
     };
     let wallet_w = account(
-        &mut tx,
+        tx,
         "user_wallet",
         &stake.asset,
-        Some(white),
+        Some(row.white),
         Side::Credit,
     )
     .await?;
     let wallet_b = account(
-        &mut tx,
+        tx,
         "user_wallet",
         &stake.asset,
-        Some(black),
+        Some(row.black),
         Side::Credit,
     )
     .await?;
-    match (white_cheated, black_cheated) {
-        (true, true) => {
+    let settled = match verdict {
+        Settled::Returned => {
             credit(&mut entries, wallet_w, stake.minor)?;
             credit(&mut entries, wallet_b, stake.minor)?;
-            settled = Settled::Returned;
+            Settled::Returned
         }
-        (true, false) => {
-            credit(&mut entries, wallet_b, pot)?;
-            settled = Settled::Confiscated { to: black };
+        Settled::Confiscated { to } => {
+            credit(
+                &mut entries,
+                if *to == row.white { wallet_w } else { wallet_b },
+                pot,
+            )?;
+            Settled::Confiscated { to: *to }
         }
-        (false, true) => {
-            credit(&mut entries, wallet_w, pot)?;
-            settled = Settled::Confiscated { to: white };
-        }
-        (false, false) => {
-            let winner = match result.as_str() {
-                "white" => Some((white, wallet_w)),
-                "black" => Some((black, wallet_b)),
-                _ => None,
-            };
-            match winner {
-                Some((who, wallet)) if ply >= crate::ratings::MIN_PLIES_FOR_RATING => {
-                    let fee = pot * fee_bps / 10_000;
-                    credit(&mut entries, wallet, pot - fee)?;
-                    if fee > 0 {
-                        let fees =
-                            account(&mut tx, FEE_KIND, &stake.asset, None, Side::Credit).await?;
-                        credit(&mut entries, fees, fee)?;
-                    }
-                    settled = Settled::Paid {
-                        winner: who,
-                        fee_minor: fee,
-                    };
-                }
-                _ => {
-                    credit(&mut entries, wallet_w, stake.minor)?;
-                    credit(&mut entries, wallet_b, stake.minor)?;
-                    settled = Settled::Returned;
-                }
+        Settled::Paid { winner, .. } => {
+            let fee = pot * fee_bps / 10_000;
+            credit(
+                &mut entries,
+                if *winner == row.white {
+                    wallet_w
+                } else {
+                    wallet_b
+                },
+                pot - fee,
+            )?;
+            if fee > 0 {
+                let fees = account(tx, FEE_KIND, &stake.asset, None, Side::Credit).await?;
+                credit(&mut entries, fees, fee)?;
+            }
+            Settled::Paid {
+                winner: *winner,
+                fee_minor: fee,
             }
         }
-    }
+    };
     let key = IdempotencyKey::new(&format!("stake:{game}:settle"))
         .map_err(|e| GameError::Ledger(e.to_string()))?;
     let game_ref = game.to_string();
     let posting = Posting::new(key, "stake_settle", Some(("game", &game_ref)), entries)
         .map_err(|e| GameError::Ledger(e.to_string()))?;
-    ledger::post_in(&mut tx, &posting)
-        .await
-        .map_err(ledger_err)?;
+    ledger::post_in(tx, &posting).await.map_err(ledger_err)?;
     sqlx::query("UPDATE games SET settled_at = now() WHERE id = $1")
         .bind(game)
         .execute(&mut *tx)
         .await?;
+    Ok(settled)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Games whose stakes are in the escrow contract (ADR 0007)
+
+/// How the contract is told a game ended. `A` in the contract is White and `B` is Black.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainOutcome {
+    WinWhite,
+    WinBlack,
+    /// Each player gets their own stake back.
+    Draw,
+}
+
+impl ChainOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChainOutcome::WinWhite => "win_white",
+            ChainOutcome::WinBlack => "win_black",
+            ChainOutcome::Draw => "draw",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ChainOutcome> {
+        Some(match s {
+            "win_white" => ChainOutcome::WinWhite,
+            "win_black" => ChainOutcome::WinBlack,
+            "draw" => ChainOutcome::Draw,
+            _ => return None,
+        })
+    }
+}
+
+/// What the contract should be told for a finished contract-path game, once fair play allows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractVerdict {
+    pub white: Uuid,
+    pub black: Uuid,
+    pub verdict: Settled,
+    pub outcome: ChainOutcome,
+}
+
+/// Finished contract-path games not yet settled, oldest first.
+pub async fn contract_unsettled(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT id FROM games WHERE stake_minor IS NOT NULL AND settled_at IS NULL AND status = 'finished' AND stake_path = 'contract' \
+         ORDER BY ended_at, id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// The decision of ADR 0004 §5 for a contract-path game, mapped to what the contract is told. It reads and moves nothing.
+/// The pot is whole: the contract has no fee, so the winner (or the honest player) takes all of it.
+pub async fn contract_verdict(
+    pool: &PgPool,
+    game: Uuid,
+    scorer: &str,
+) -> Result<Result<ContractVerdict, Waiting>, GameError> {
+    let mut conn = pool.acquire().await?;
+    if halted(&mut conn).await? {
+        return Ok(Err(Waiting::Halted));
+    }
+    let Some(g) = sqlx::query(
+        "SELECT white_id, black_id, result, ply, stake_minor, stake_asset FROM games \
+         WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL AND stake_path = 'contract'",
+    )
+    .bind(game)
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(Err(Waiting::NothingToDo));
+    };
+    let Some(row) = FinishedRow::read(&g)? else {
+        return Ok(Err(Waiting::NothingToDo));
+    };
+    let verdict = match decide(&mut conn, game, &row, scorer).await? {
+        Ok(v) => v,
+        Err(w) => return Ok(Err(w)),
+    };
+    let outcome = match &verdict {
+        Settled::Returned => ChainOutcome::Draw,
+        Settled::Paid { winner, .. } | Settled::Confiscated { to: winner } => {
+            if *winner == row.white {
+                ChainOutcome::WinWhite
+            } else {
+                ChainOutcome::WinBlack
+            }
+        }
+    };
+    Ok(Ok(ContractVerdict {
+        white: row.white,
+        black: row.black,
+        verdict,
+        outcome,
+    }))
+}
+
+/// The network shows the match settled (or refunded) with `outcome`: move the same pot in the ledger and mark the game
+/// settled, once. The ledger follows the network, never the other way round, and no fee is taken.
+pub async fn record_chain_settlement(
+    pool: &PgPool,
+    game: Uuid,
+    outcome: ChainOutcome,
+) -> Result<Option<Settled>, GameError> {
+    let mut tx = pool.begin().await?;
+    let Some(g) = sqlx::query(
+        "SELECT white_id, black_id, result, ply, stake_minor, stake_asset FROM games \
+         WHERE id = $1 AND status = 'finished' AND stake_minor IS NOT NULL AND settled_at IS NULL AND stake_path = 'contract' FOR UPDATE",
+    )
+    .bind(game)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(row) = FinishedRow::read(&g)? else {
+        return Ok(None);
+    };
+    let verdict = match outcome {
+        ChainOutcome::WinWhite => Settled::Paid {
+            winner: row.white,
+            fee_minor: 0,
+        },
+        ChainOutcome::WinBlack => Settled::Paid {
+            winner: row.black,
+            fee_minor: 0,
+        },
+        ChainOutcome::Draw => Settled::Returned,
+    };
+    let settled = post_pot(&mut tx, game, &row, &verdict, 0).await?;
     tx.commit()
         .await
         .map_err(|e| ledger_err(LedgerStoreError::from(e)))?;
-    Ok(Ok(settled))
+    Ok(Some(settled))
 }
 
 /// Escrow that does not equal the stakes it should hold, for one asset.

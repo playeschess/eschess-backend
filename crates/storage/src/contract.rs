@@ -58,8 +58,21 @@ pub async fn record_tx(
     hash_hex: &str,
     max_time: i64,
 ) -> Result<(), sqlx::Error> {
+    record_tx_with(pool, game, step, player, hash_hex, max_time, None).await
+}
+
+/// [`record_tx`] with a note about what it does. A settle records the outcome it tells the contract.
+pub async fn record_tx_with(
+    pool: &PgPool,
+    game: Uuid,
+    step: Step,
+    player: Option<Uuid>,
+    hash_hex: &str,
+    max_time: i64,
+    detail: Option<&str>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO contract_txs (tx_hash, game_id, step, player_id, max_time) VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO contract_txs (tx_hash, game_id, step, player_id, max_time, detail) VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (tx_hash) DO NOTHING",
     )
     .bind(hash_hex)
@@ -67,9 +80,27 @@ pub async fn record_tx(
     .bind(step.as_str())
     .bind(player)
     .bind(max_time)
+    .bind(detail)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// The outcome the game's settle transaction told the contract, if one was recorded. There is at most one outcome that can
+/// have landed: the contract refuses a second settle, and nothing is recorded for a call the network would refuse.
+pub async fn settle_outcome(
+    pool: &PgPool,
+    game: Uuid,
+) -> Result<Option<crate::stakes::ChainOutcome>, sqlx::Error> {
+    let detail: Option<String> = sqlx::query_scalar(
+        "SELECT detail FROM contract_txs WHERE game_id = $1 AND step = 'settle' AND detail IS NOT NULL \
+         ORDER BY created_at, tx_hash LIMIT 1",
+    )
+    .bind(game)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(detail.and_then(|d| crate::stakes::ChainOutcome::parse(&d)))
 }
 
 /// The game's most recently recorded transaction, if any.
