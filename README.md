@@ -353,6 +353,19 @@ by default; its header says how to run it). Nothing in the game server uses the 
 stakes in the database ledger (see `plan.md` for the steps that move them onto the contract). The deployed testnet
 contract and what was tried on it are in `docs/escrow-testnet.md`.
 
+## Staking on the escrow contract (ADR 0007) — testnet only
+
+A setting chooses where new staked games keep their stakes: `UPDATE platform_settings SET value = 'contract' WHERE name =
+'stake_path'` (the default is `ledger`, the database path described below). A game remembers the path it was made on. On the
+contract path, a staked game that has its two players waits in `funding` (no clock, moves refused) while the worker's
+funding job locks the stakes in the contract: it creates the match (the match id is the game's id), tops a player's account
+up from the platform wallet if it holds less than the stake, takes each player's deposit signed with their own key, and then
+starts the game. It reads the contract every round and does only the next missing step, records each transaction before
+sending it, waits for one that may still land instead of building another, and gives a failing step four tries. A game still
+funding after two minutes is cancelled (the match too, which returns any deposit) and the ledger holds are released.
+Needs `ESCROW_CONTRACT`, `ESCROW_ADMIN_SECRET_FILE` and `WALLET_MASTER_KEY_FILE` on the worker (see `.env.example`).
+Settling a contract game through the contract is the next piece; until then the ledger settle job leaves them alone.
+
 ## Staked games (crates/storage, bins/worker) — testnet only
 
 A rated game can carry a stake from the list in `STAKES_USDC`. The creator's stake is held (wallet to a `stake_escrow`

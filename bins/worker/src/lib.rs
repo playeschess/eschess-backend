@@ -6,6 +6,7 @@
 
 pub mod expire;
 pub mod fairplay;
+pub mod funding;
 pub mod reconcile;
 pub mod sender;
 pub mod settle;

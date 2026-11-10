@@ -195,6 +195,7 @@ struct GameRow {
     rated: bool,
     stake_minor: Option<i64>,
     stake_asset: Option<String>,
+    stake_path: String,
     settled: bool,
     white_id: Option<Uuid>,
     black_id: Option<Uuid>,
@@ -213,7 +214,7 @@ struct GameRow {
     offer_ply: [Option<i32>; 2],
 }
 
-const COLS: &str = "id, created_by, color_preference, rated, stake_minor, stake_asset, settled_at IS NOT NULL AS settled, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
+const COLS: &str = "id, created_by, color_preference, rated, stake_minor, stake_asset, stake_path, settled_at IS NOT NULL AS settled, white_id, black_id, base_ms, increment_ms, status, result, end_reason, fen, ply, event_seq, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, draw_offered_by, white_offer_ply, black_offer_ply";
 
 fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
     GameRow {
@@ -223,6 +224,7 @@ fn row_from(r: &sqlx::postgres::PgRow) -> GameRow {
         rated: r.get("rated"),
         stake_minor: r.get("stake_minor"),
         stake_asset: r.get("stake_asset"),
+        stake_path: r.get("stake_path"),
         settled: r.get("settled"),
         white_id: r.get("white_id"),
         black_id: r.get("black_id"),
@@ -477,6 +479,10 @@ pub async fn create_game(
     let id = Uuid::now_v7();
     let clock = Clock::start(control, LagPolicy::default(), 0).state();
     let mut tx = pool.begin().await?;
+    let path = match stake {
+        Some(_) => stakes::current_path(&mut tx).await?,
+        None => stakes::StakePath::Ledger,
+    };
     if rated {
         if let Some(until) = crate::fairplay::suspended_until(&mut *tx, creator).await? {
             return Err(GameError::Suspended(until));
@@ -497,8 +503,8 @@ pub async fn create_game(
         return Err(GameError::TooManyOpenGames);
     }
     sqlx::query(
-        "INSERT INTO games (id, created_by, color_preference, rated, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, stake_minor, stake_asset)
-         VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10,$12,$13)",
+        "INSERT INTO games (id, created_by, color_preference, rated, base_ms, increment_ms, fen, white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, stake_minor, stake_asset, stake_path)
+         VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10,$12,$13,$14)",
     )
     .bind(id)
     .bind(creator)
@@ -513,6 +519,7 @@ pub async fn create_game(
     .bind(rated)
     .bind(stake.map(|s| s.minor))
     .bind(stake.map(|s| s.asset.to_string()))
+    .bind(path.as_str())
     .execute(&mut *tx)
     .await?;
     // The creator's stake is held in the same transaction, so a game never exists without its first stake.
@@ -541,7 +548,7 @@ pub async fn list_games(
 ) -> Result<Vec<GameView>> {
     let sql = match scope {
         Scope::Open => "SELECT id FROM games WHERE status = 'waiting' AND created_by <> $1 ORDER BY created_at DESC, id DESC LIMIT $2",
-        Scope::MyActive => "SELECT id FROM games WHERE status IN ('waiting', 'active') AND (created_by = $1 OR white_id = $1 OR black_id = $1) ORDER BY created_at DESC, id DESC LIMIT $2",
+        Scope::MyActive => "SELECT id FROM games WHERE status IN ('waiting', 'funding', 'active') AND (created_by = $1 OR white_id = $1 OR black_id = $1) ORDER BY created_at DESC, id DESC LIMIT $2",
         Scope::MyFinished => "SELECT id FROM games WHERE status = 'finished' AND (white_id = $1 OR black_id = $1) ORDER BY ended_at DESC, id DESC LIMIT $2",
     };
     let ids: Vec<Uuid> = sqlx::query_scalar(sql)
@@ -618,21 +625,40 @@ pub async fn join_game(
     let control = TimeControl::new(row.base_ms as u64, row.increment_ms as u64)
         .map_err(|_| GameError::Refused(Refusal::CorruptHistory))?;
     let clock = Clock::start(control, LagPolicy::default(), now as u64).state();
-    sqlx::query(
-        "UPDATE games SET status = 'active', white_id = $2, black_id = $3, started_at = now(), turn_started_at_ms = $4,
-             white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8, event_seq = event_seq + 1
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(white)
-    .bind(black)
-    .bind(now)
-    .bind(clock.remaining_ms[0] as i64)
-    .bind(clock.remaining_ms[1] as i64)
-    .bind(clock.lag_quota_ms[0] as i64)
-    .bind(clock.lag_quota_ms[1] as i64)
-    .execute(&mut *tx)
-    .await?;
+    if row.stake_path == "contract" {
+        // The players are known and the ledger holds both stakes, but no clock runs until the stakes are locked in the
+        // contract on the network (ADR 0007). A worker job then calls `activate_funded`.
+        sqlx::query(
+            "UPDATE games SET status = 'funding', white_id = $2, black_id = $3, funding_started_at = now(),
+                 white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, event_seq = event_seq + 1
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(white)
+        .bind(black)
+        .bind(clock.remaining_ms[0] as i64)
+        .bind(clock.remaining_ms[1] as i64)
+        .bind(clock.lag_quota_ms[0] as i64)
+        .bind(clock.lag_quota_ms[1] as i64)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE games SET status = 'active', white_id = $2, black_id = $3, started_at = now(), turn_started_at_ms = $4,
+                 white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8, event_seq = event_seq + 1
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(white)
+        .bind(black)
+        .bind(now)
+        .bind(clock.remaining_ms[0] as i64)
+        .bind(clock.remaining_ms[1] as i64)
+        .bind(clock.lag_quota_ms[0] as i64)
+        .bind(clock.lag_quota_ms[1] as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
     notify(&mut tx, id).await?;
     tx.commit().await?;
     let mut conn = pool.acquire().await?;
@@ -708,7 +734,7 @@ pub async fn play_move(
     }
 
     if row.status != "active" {
-        return Err(if row.status == "waiting" {
+        return Err(if matches!(row.status.as_str(), "waiting" | "funding") {
             GameError::NotStarted
         } else {
             GameError::Refused(Refusal::GameOver)
@@ -832,7 +858,7 @@ async fn change_offers(
     let mut tx = pool.begin().await?;
     let (row, moves, now) = lock_for_player(&mut tx, id, actor).await?;
     if row.status != "active" {
-        return Err(if row.status == "waiting" {
+        return Err(if matches!(row.status.as_str(), "waiting" | "funding") {
             GameError::NotStarted
         } else {
             GameError::Refused(Refusal::GameOver)
@@ -873,7 +899,7 @@ async fn end_by_player(
     let mut tx = pool.begin().await?;
     let (row, moves, now) = lock_for_player(&mut tx, id, actor).await?;
     if row.status != "active" {
-        return Err(if row.status == "waiting" {
+        return Err(if matches!(row.status.as_str(), "waiting" | "funding") {
             GameError::NotStarted
         } else {
             GameError::Refused(Refusal::GameOver)
@@ -941,10 +967,18 @@ pub(crate) async fn start_matched(
     } else {
         (second, first)
     };
+    // A staked game on the contract path starts in `funding`: no clock until its stakes are locked on the network.
+    let path = match stake {
+        Some(_) => stakes::current_path(db).await?,
+        None => stakes::StakePath::Ledger,
+    };
+    let funding = path == stakes::StakePath::Contract;
     sqlx::query(
         "INSERT INTO games (id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, fen,
-             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq, stake_minor, stake_asset)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13,$14,now(),1,$15,$16)",
+             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq, stake_minor, stake_asset, stake_path, funding_started_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $17 THEN 'funding' ELSE 'active' END,$9,$10,$11,$12,$13,
+                 CASE WHEN $17 THEN NULL ELSE $14 END, CASE WHEN $17 THEN NULL ELSE now() END,1,$15,$16,$18,
+                 CASE WHEN $17 THEN now() ELSE NULL END)",
     )
     .bind(id)
     .bind(first)
@@ -962,7 +996,99 @@ pub(crate) async fn start_matched(
     .bind(now)
     .bind(stake.map(|s| s.minor))
     .bind(stake.map(|s| s.asset.to_string()))
+    .bind(funding)
+    .bind(path.as_str())
     .execute(&mut *db)
     .await?;
     Ok(id)
+}
+
+/// A staked game on the contract path waiting for its stakes to be locked on the network (ADR 0007).
+#[derive(Debug, Clone)]
+pub struct FundingGame {
+    pub id: Uuid,
+    pub white: Uuid,
+    pub black: Uuid,
+    pub stake: Stake,
+    /// Unix milliseconds when it entered `funding`.
+    pub started_at_ms: i64,
+}
+
+/// Games in `funding`, oldest first.
+pub async fn funding_games(pool: &PgPool, limit: i64) -> Result<Vec<FundingGame>> {
+    let rows = sqlx::query(
+        "SELECT id, white_id, black_id, stake_minor, stake_asset, (extract(epoch FROM funding_started_at) * 1000)::bigint AS started_ms \
+         FROM games WHERE status = 'funding' ORDER BY funding_started_at, id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            let stake = stakes::stake_of(
+                r.get("stake_minor"),
+                r.get::<Option<String>, _>("stake_asset").as_deref(),
+            )?
+            .ok_or(GameError::Refused(Refusal::CorruptHistory))?;
+            Ok(FundingGame {
+                id: r.get("id"),
+                white: r.get("white_id"),
+                black: r.get("black_id"),
+                stake,
+                started_at_ms: r.get("started_ms"),
+            })
+        })
+        .collect()
+}
+
+/// Both stakes are locked on the network: the game becomes `active` and White's clock starts now. Does nothing, and says
+/// so, if the game is not in `funding` (someone else already activated or cancelled it).
+pub async fn activate_funded(pool: &PgPool, id: Uuid) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = load_locked(&mut tx, id).await?;
+    if row.status != "funding" {
+        return Ok(false);
+    }
+    let now = now_ms(&mut tx).await?;
+    let control = TimeControl::new(row.base_ms as u64, row.increment_ms as u64)
+        .map_err(|_| GameError::Refused(Refusal::CorruptHistory))?;
+    let clock = Clock::start(control, LagPolicy::default(), now as u64).state();
+    sqlx::query(
+        "UPDATE games SET status = 'active', started_at = now(), turn_started_at_ms = $2,
+             white_remaining_ms = $3, black_remaining_ms = $4, white_lag_quota_ms = $5, black_lag_quota_ms = $6, event_seq = event_seq + 1
+         WHERE id = $1 AND status = 'funding'",
+    )
+    .bind(id)
+    .bind(now)
+    .bind(clock.remaining_ms[0] as i64)
+    .bind(clock.remaining_ms[1] as i64)
+    .bind(clock.lag_quota_ms[0] as i64)
+    .bind(clock.lag_quota_ms[1] as i64)
+    .execute(&mut *tx)
+    .await?;
+    notify(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// The stakes could not be locked in time (or a player was closed): the game is cancelled and both ledger holds are
+/// released. The caller has already seen to anything on the network (cancelled the match). Returns whether it did so.
+pub async fn cancel_funding(pool: &PgPool, id: Uuid) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = load_locked(&mut tx, id).await?;
+    if row.status != "funding" {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE games SET status = 'cancelled', event_seq = event_seq + 1 WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(stake) = stakes::stake_of(row.stake_minor, row.stake_asset.as_deref())? {
+        for player in [row.white_id, row.black_id].into_iter().flatten() {
+            stakes::release(&mut tx, id, player, &stake).await?;
+        }
+    }
+    notify(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(true)
 }

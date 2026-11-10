@@ -254,7 +254,7 @@ fn muxed(address: &Address) -> XdrMuxed {
     }
 }
 
-fn asset(asset: &AssetId) -> Result<Asset, TxError> {
+pub(crate) fn asset(asset: &AssetId) -> Result<Asset, TxError> {
     let Some(issuer) = asset.issuer() else {
         return Ok(Asset::Native);
     };

@@ -43,6 +43,7 @@ async fn main() {
     );
 
     spawn_wallet_setup(pool.clone(), chain.clone(), &stellar);
+    spawn_funding(pool.clone(), chain.clone(), &stellar);
     spawn_reconcile(pool.clone(), chain.clone(), &stellar);
 
     // Deposits need only the public address.
@@ -235,6 +236,94 @@ fn spawn_wallet_setup(
                 Err(e) => tracing::warn!("wallet setup round failed (will retry): {e}"),
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+}
+
+/// Locks the stakes of staked games in the escrow contract (ADR 0007). Off unless the contract (ESCROW_CONTRACT), its
+/// admin's key (ESCROW_ADMIN_SECRET_FILE) and the master key for players' wallets (WALLET_MASTER_KEY_FILE) are all given.
+/// STELLAR_HOT_SECRET_FILE, if set, lets the platform wallet top up a player whose own account is short. Testnet only.
+/// Games are only made on the contract path when the `stake_path` setting says so.
+fn spawn_funding(
+    pool: sqlx::PgPool,
+    chain: Arc<dyn eschess_stellar::Chain>,
+    stellar: &eschess_api::config::StellarConfig,
+) {
+    use eschess_stellar::custody::{KeyVault, LocalVault};
+    use eschess_stellar::soroban::SorobanHttp;
+    let get = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let (Some(contract), Some(admin_file), Some(master)) = (
+        get("ESCROW_CONTRACT"),
+        get("ESCROW_ADMIN_SECRET_FILE"),
+        get("WALLET_MASTER_KEY_FILE"),
+    ) else {
+        tracing::info!(
+            "ESCROW_CONTRACT, ESCROW_ADMIN_SECRET_FILE and WALLET_MASTER_KEY_FILE are not all set: this worker will not lock stakes in the contract"
+        );
+        return;
+    };
+    let network = Network::parse(&stellar.network).expect("the network was checked by Config");
+    let escrow = eschess_stellar::escrow::Escrow::new(
+        eschess_domain::stellar::ContractId::parse(contract.trim())
+            .expect("ESCROW_CONTRACT is not a contract address"),
+    );
+    let token = eschess_stellar::escrow::asset_contract_id(network, &stellar.usdc)
+        .expect("cannot work out the USDC token contract");
+    let vault: Arc<dyn KeyVault> = Arc::new(
+        LocalVault::from_file(std::path::Path::new(master.trim()), 1, network)
+            .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}")),
+    );
+    let admin = LocalSigner::from_file(std::path::Path::new(admin_file.trim()), network)
+        .expect("cannot load the escrow admin's key");
+    let hot = get("STELLAR_HOT_SECRET_FILE").map(|f| {
+        LocalSigner::from_file(std::path::Path::new(f.trim()), network)
+            .expect("cannot load the platform wallet's key")
+    });
+    let rpc_url = get("SOROBAN_RPC_URL").unwrap_or_else(|| match network {
+        Network::Testnet => "https://soroban-testnet.stellar.org".to_string(),
+        Network::Public => panic!("SOROBAN_RPC_URL must be set for the public network"),
+    });
+    let rpc = SorobanHttp::new(&rpc_url).expect("cannot build the Soroban RPC client");
+    let config = eschess_worker::funding::FundingConfig {
+        network,
+        escrow,
+        token,
+        usdc: stellar.usdc.clone(),
+        timeout_secs: eschess_worker::funding::DEFAULT_TIMEOUT_SECS,
+        match_expiry_secs: eschess_worker::funding::DEFAULT_MATCH_EXPIRY_SECS,
+        tx_wait: Duration::from_secs(25),
+        batch: 10,
+    };
+    tracing::info!(
+        "locking stakes in the escrow contract {} (admin {})",
+        contract.trim(),
+        admin.public_key().to_g()
+    );
+    tokio::spawn(async move {
+        loop {
+            let parts = eschess_worker::funding::Parts {
+                pool: &pool,
+                rpc: &rpc,
+                chain: &*chain,
+                vault: vault.clone(),
+                admin: &admin,
+                hot: hot
+                    .as_ref()
+                    .map(|h| h as &dyn eschess_stellar::signer::Signer),
+            };
+            match eschess_worker::funding::tick(&parts, &config).await {
+                Ok(r) if r.activated + r.cancelled + r.sent + r.failed > 0 => tracing::info!(
+                    "funding: {} started, {} cancelled, {} transactions, {} waiting, {} failed",
+                    r.activated,
+                    r.cancelled,
+                    r.sent,
+                    r.waiting,
+                    r.failed
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("funding round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
 }
