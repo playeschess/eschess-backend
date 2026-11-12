@@ -22,6 +22,7 @@ What the player sees:
 | Who creates games | Players, through our app. The contract's "admin" is our server's key, not a person |
 | Platform fee | Postponed. The contract is not being changed for now, so it pays the winner the whole pot |
 | Adding and withdrawing money | Two ways each, the same both directions. **USDC:** send it to the user's address to add, or withdraw to any Stellar address (works from day one). **Their own currency:** later, through a regulated ramp provider that converts to and from USDC. Provider not chosen |
+| Where games are played | **Lichess**: players link their Lichess account, we create the game there, they play on lichess.org, we read the result and settle. Conditional on Lichess's terms (`docs/adr/0005-game-venue.md`) |
 | What happens to a cheater's stake | It goes to the honest player, automatically, once a reviewer confirms the cheating |
 | Withdrawal delay | None. Approved withdrawals go out at once (a player with an open fair-play case still waits) |
 | Unjoined staked games | Cancelled after 10 minutes, stake returned |
@@ -108,7 +109,7 @@ Done when: the existing end-to-end test script plays staked games through the co
 
 ### Step 5. The app players use
 
-Status: not started, needs decisions (web or mobile, and who builds it)
+Status: not started. Decided: web first, in its own repo (2026-11-12). Next: agree what the web app needs from the API.
 
 A board, a lobby, a Stake button, a wallet screen, notices ("your stake was held", "you won"). We can reuse open-source board pieces, but their licences must be checked first.
 
@@ -130,9 +131,17 @@ Status: not started
 - **Monitoring:** alerts for the contract's events and for the balance check.
 - **Run the workers somewhere real:** the API, the worker and the private fair-play worker.
 
-## Parallel track: Lichess
+## Lichess (chosen direction, conditional)
 
-A teammate is reading Lichess's terms and may contact them. Nothing here waits on it. The write-up is `docs/adr/0005-game-venue.md`. If Lichess agrees in writing, the game server could be replaced later, but staking and escrow stay ours either way.
+Decided 2026-11-12: games are played on lichess.org and we read the result. A teammate is reading Lichess's terms and may contact them; their answer decides whether this can launch. Details and open rules are in `docs/adr/0005-game-venue.md`. Staking and escrow stay ours either way.
+
+### Step 5b. Lichess as the game venue
+
+Status: not started.
+1. Put the game result behind a swappable source (our server or Lichess).
+2. Link a Lichess account to a user (OAuth).
+3. Create the game on Lichess for two matched players and watch for its result.
+4. Fair-play data from Lichess (fetch the finished game, score it, check account flags).
 
 ## Later (not now)
 
@@ -142,13 +151,17 @@ A teammate is reading Lichess's terms and may contact them. Nothing here waits o
 
 ## Decisions still needed from you
 
-1. App: web or mobile first, and who builds it?
-2. Fee: how much, and when (needs the contract change).
-3. Fiat provider and which countries.
-4. Hold limit while a case is open (placeholder: 7 days) and who gets the escalation.
-5. Appeal deadline (none today).
-6. Where the servers will run.
-7. Legal counsel: who is handling it?
+Decided on 2026-11-12:
+- App: **web first**, in its own repo.
+- Fee: stays postponed; the contract is unchanged for now. The owner will say when it changes.
+- Fiat: the owner expects **Allbridge** to handle it. To confirm: Allbridge is known as a cross-chain stablecoin bridge, which may not cover card/bank-to-USDC.
+- Hold limit while a case is open: **7 days**.
+
+Still open:
+1. Who gets the escalation when a case passes 14 days.
+2. Appeal deadline (none today).
+3. Where the servers will run.
+4. Legal counsel: who is handling it?
 
 ## Rules we follow
 
