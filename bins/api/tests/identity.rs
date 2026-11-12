@@ -39,6 +39,7 @@ impl Api {
                 hub: eschess_api::hub::Hub::new(),
                 chain: None,
                 vault: None,
+                lichess: None,
             }),
             pool,
             mailer,

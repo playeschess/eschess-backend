@@ -572,6 +572,7 @@ dependencies = [
  "eschess-fairplay",
  "eschess-game",
  "eschess-ledger",
+ "eschess-lichess",
  "eschess-notification",
  "eschess-stellar",
  "eschess-storage",
@@ -632,6 +633,21 @@ dependencies = [
  "proptest",
  "sha2 0.10.9",
  "uuid",
+]
+
+[[package]]
+name = "eschess-lichess"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]

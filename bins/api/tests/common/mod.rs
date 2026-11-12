@@ -54,6 +54,7 @@ impl Api {
             hub: eschess_api::hub::Hub::new(),
             chain,
             vault: None,
+            lichess: None,
         };
         Api {
             app: app(state.clone()),
@@ -163,6 +164,30 @@ impl Api {
             hub: eschess_api::hub::Hub::new(),
             chain: None,
             vault: Some(vault),
+            lichess: None,
+        };
+        Api {
+            app: app(state.clone()),
+            pool,
+            state,
+            tasks: Default::default(),
+        }
+    }
+
+    /// With a (fake) Lichess, for the account-linking routes.
+    pub fn with_lichess(
+        pool: PgPool,
+        config: Config,
+        lichess: Arc<dyn eschess_lichess::Lichess>,
+    ) -> Api {
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(config),
+            mailer: Arc::new(CapturingMailer::default()),
+            hub: eschess_api::hub::Hub::new(),
+            chain: None,
+            vault: None,
+            lichess: Some(lichess),
         };
         Api {
             app: app(state.clone()),

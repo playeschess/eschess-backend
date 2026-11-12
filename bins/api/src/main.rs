@@ -70,6 +70,10 @@ async fn main() {
     if vault.is_none() {
         tracing::info!("WALLET_MASTER_KEY_FILE is not set: players get no wallet of their own yet");
     }
+    let lichess: Option<Arc<dyn eschess_lichess::Lichess>> = config.lichess.as_ref().map(|l| {
+        Arc::new(eschess_lichess::HttpLichess::new(&l.base_url))
+            as Arc<dyn eschess_lichess::Lichess>
+    });
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -77,6 +81,7 @@ async fn main() {
         hub: eschess_api::hub::Hub::new(),
         chain,
         vault,
+        lichess,
     };
     // Listen for game changes made by any server, and push them to the players connected to this one.
     eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());

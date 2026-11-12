@@ -10,6 +10,7 @@ publish.workspace = true
 eschess-domain = { path = "../../crates/domain" }
 eschess-auth = { path = "../../crates/auth" }
 eschess-storage = { path = "../../crates/storage" }
+eschess-lichess = { path = "../../crates/lichess" }
 eschess-stellar = { path = "../../crates/stellar" }
 eschess-notification = { path = "../../crates/notification" }
 eschess-game = { path = "../../crates/game" }
