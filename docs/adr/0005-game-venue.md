@@ -1,6 +1,6 @@
 # ADR 0005 — Where the games are played: our server or Lichess
 
-**Status:** Proposed (a question for the owner and the team, not a decision) · **Date:** 2026-11-09 · **Follows:** ADR 0004
+**Status:** Direction chosen by the owner on 2026-11-12 (Option B, sending players to Lichess), **conditional on Lichess's terms** · **Date:** 2026-11-09 (updated 2026-11-12) · **Follows:** ADR 0004
 
 ## Why this is open
 
@@ -61,8 +61,31 @@ escrow equals unsettled stakes) would still hold, but "the result is true" would
 3. Whether their Board API's time-control limits fit the product.
 4. How a finished game's result, abort and disconnect states look in their API, and how soon a cheating mark appears.
 
-## Recommendation (open to change)
+## Direction chosen (owner, 2026-11-12)
 
-Keep Option A unless 1 and 2 come back clearly yes, because the platform that holds people's money should be able to
-stand behind the result. Either way, the legal review of staking money is unchanged: moving the games elsewhere does not
-move that responsibility.
+The owner chose Option B in its simplest form: the platform handles the money, and the game is played on lichess.org.
+
+1. The player signs up on our site and links their Lichess account (Lichess OAuth proves they own it).
+2. The player enters an amount and presses Stake. The stake is locked in the escrow contract, as today.
+3. When two players are matched, we create the game on Lichess for those two accounts (an open challenge restricted
+   to the two usernames, with a fixed time control and rated or not, so players cannot change the terms) and send both
+   players to it. Whether Lichess allows exactly this call is to be confirmed.
+4. They play on Lichess. Nothing is embedded for playing; an embed can show a finished game for replay or spectators.
+5. We read the finished game from Lichess's API and settle through the contract with the usual rules.
+
+Rules to design (not decided here):
+- **No-shows and aborts:** no game started within a few minutes cancels the match and returns both stakes.
+- **Only the right game counts:** a result is accepted only for the game we created, between the two linked accounts.
+- **Time controls:** limited to what Lichess allows for challenges; rapid and classical are safe, bullet is not offered.
+- **Fair play:** we cannot score moves live. After the game we can fetch it and run our timing scorer on it, and check
+  whether Lichess has flagged either account. What their data really contains must be checked before relying on it.
+  A mark appearing after payout cannot be undone, so settlement keeps waiting for the fair-play check as today.
+- **Collusion** (losing on purpose) exists in both options and needs its own rules.
+
+Build order: (1) put the game result behind a swappable source, so the money side works with our server or with Lichess
+and nothing is lost if Lichess says no; (2) linking a Lichess account; (3) creating the game and watching its result;
+(4) the fair-play data from Lichess.
+
+**Condition:** findings 1 and 2 above (Lichess's terms, and a written yes) still decide whether this can launch. Until
+they come back, nothing here goes beyond the testnet, and Option A's code stays. The legal review of staking money is
+unchanged: moving the games elsewhere does not move that responsibility.
