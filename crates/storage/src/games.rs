@@ -38,6 +38,8 @@ pub enum GameError {
     /// The rules said no (illegal move, not your turn, game over ...).
     Refused(Refusal),
     InvalidTimeControl(&'static str),
+    /// Staked games are played on Lichess and this player has not linked a Lichess account (ADR 0005).
+    LichessNotLinked,
     /// A staked game needs a confirmed email (ADR 0004 §2).
     EmailNotConfirmed,
     /// A player with an open fair-play case, a suspension or a closure cannot stake (ADR 0004 §2).
@@ -75,6 +77,10 @@ impl fmt::Display for GameError {
             ),
             GameError::Refused(r) => write!(f, "{r}"),
             GameError::InvalidTimeControl(why) => write!(f, "{why}"),
+            GameError::LichessNotLinked => write!(
+                f,
+                "link your Lichess account before staking: staked games are played on Lichess"
+            ),
             GameError::EmailNotConfirmed => write!(f, "confirm your email before staking money"),
             GameError::StakingRestricted => write!(f, "you cannot stake money right now"),
             GameError::InsufficientFunds => write!(f, "your balance does not cover that stake"),
@@ -254,6 +260,11 @@ async fn now_ms(db: &mut PgConnection) -> Result<i64> {
 }
 
 async fn load_locked(db: &mut PgConnection, id: Uuid) -> Result<GameRow> {
+    Ok(load_locked_with_venue(db, id).await?.0)
+}
+
+/// The game row and where it is played.
+async fn load_locked_with_venue(db: &mut PgConnection, id: Uuid) -> Result<(GameRow, String)> {
     let r = sqlx::query(&format!(
         "SELECT {COLS}, venue FROM games WHERE id = $1 FOR UPDATE"
     ))
@@ -261,11 +272,17 @@ async fn load_locked(db: &mut PgConnection, id: Uuid) -> Result<GameRow> {
     .fetch_optional(&mut *db)
     .await?
     .ok_or(GameError::NotFound)?;
-    // A game played on Lichess has no clock or moves here: every action that locks a game for play stops at this door.
-    if r.get::<String, _>("venue") != "own" {
+    Ok((row_from(&r), r.get("venue")))
+}
+
+/// Like [`load_locked`], for anything that plays the game on our server (moves, clocks, resigning, draw offers). A game
+/// played on Lichess has no clock or moves here, so it stops at this door.
+async fn load_locked_for_play(db: &mut PgConnection, id: Uuid) -> Result<GameRow> {
+    let (row, venue) = load_locked_with_venue(db, id).await?;
+    if venue != "own" {
         return Err(GameError::Refused(Refusal::PlayedElsewhere));
     }
-    Ok(row_from(&r))
+    Ok(row)
 }
 
 async fn moves_of(db: &mut PgConnection, id: Uuid) -> Result<Vec<String>> {
@@ -487,6 +504,10 @@ pub async fn create_game(
         Some(_) => stakes::current_path(&mut tx).await?,
         None => stakes::StakePath::Ledger,
     };
+    // Where staked games are played may need the creator to have a Lichess account (ADR 0005).
+    if stake.is_some() {
+        stakes::venue_for(&mut tx, &[creator], base_ms as i64, increment_ms as i64).await?;
+    }
     if rated {
         if let Some(until) = crate::fairplay::suspended_until(&mut *tx, creator).await? {
             return Err(GameError::Suspended(until));
@@ -572,7 +593,7 @@ pub async fn list_games(
 async fn get_game_on(conn: &mut PgConnection, id: Uuid, viewer: Uuid) -> Result<GameView> {
     // Settle a fallen flag in its own short transaction first, then read.
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    if let Ok(row) = load_locked(&mut tx, id).await {
+    if let Ok(row) = load_locked_for_play(&mut tx, id).await {
         if row.status == "active" {
             let moves = moves_of(&mut tx, id).await?;
             let now = now_ms(&mut tx).await?;
@@ -629,12 +650,26 @@ pub async fn join_game(
     let control = TimeControl::new(row.base_ms as u64, row.increment_ms as u64)
         .map_err(|_| GameError::Refused(Refusal::CorruptHistory))?;
     let clock = Clock::start(control, LagPolicy::default(), now as u64).state();
+    // A staked game is played where the platform says at the moment it starts (ADR 0005); both players must be able to.
+    let venue = match stakes::stake_of(row.stake_minor, row.stake_asset.as_deref())? {
+        Some(_) => {
+            stakes::venue_for(
+                &mut tx,
+                &[row.created_by, joiner],
+                row.base_ms,
+                row.increment_ms,
+            )
+            .await?
+        }
+        None => stakes::Venue::Own,
+    };
     if row.stake_path == "contract" {
         // The players are known and the ledger holds both stakes, but no clock runs until the stakes are locked in the
         // contract on the network (ADR 0007). A worker job then calls `activate_funded`.
         sqlx::query(
             "UPDATE games SET status = 'funding', white_id = $2, black_id = $3, funding_started_at = now(),
-                 white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, event_seq = event_seq + 1
+                 white_remaining_ms = $4, black_remaining_ms = $5, white_lag_quota_ms = $6, black_lag_quota_ms = $7, event_seq = event_seq + 1,
+                 venue = $8
              WHERE id = $1",
         )
         .bind(id)
@@ -644,12 +679,14 @@ pub async fn join_game(
         .bind(clock.remaining_ms[1] as i64)
         .bind(clock.lag_quota_ms[0] as i64)
         .bind(clock.lag_quota_ms[1] as i64)
+        .bind(venue.as_str())
         .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
             "UPDATE games SET status = 'active', white_id = $2, black_id = $3, started_at = now(), turn_started_at_ms = $4,
-                 white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8, event_seq = event_seq + 1
+                 white_remaining_ms = $5, black_remaining_ms = $6, white_lag_quota_ms = $7, black_lag_quota_ms = $8, event_seq = event_seq + 1,
+                 venue = $9
              WHERE id = $1",
         )
         .bind(id)
@@ -660,6 +697,7 @@ pub async fn join_game(
         .bind(clock.remaining_ms[1] as i64)
         .bind(clock.lag_quota_ms[0] as i64)
         .bind(clock.lag_quota_ms[1] as i64)
+        .bind(venue.as_str())
         .execute(&mut *tx)
         .await?;
     }
@@ -698,7 +736,7 @@ async fn lock_for_player(
     id: Uuid,
     actor: Uuid,
 ) -> Result<(GameRow, Vec<String>, i64)> {
-    let row = load_locked(tx, id).await?;
+    let row = load_locked_for_play(tx, id).await?;
     if row.white_id != Some(actor) && row.black_id != Some(actor) {
         // A waiting game's creator is also "in" it, but cannot act until someone joins.
         return Err(if row.status == "waiting" && row.created_by == actor {
@@ -977,12 +1015,25 @@ pub(crate) async fn start_matched(
         None => stakes::StakePath::Ledger,
     };
     let funding = path == stakes::StakePath::Contract;
+    // Where it is played (ADR 0005): both players must be able to play there.
+    let venue = match stake {
+        Some(_) => {
+            stakes::venue_for(
+                db,
+                &[first, second],
+                control.base_ms() as i64,
+                control.increment_ms() as i64,
+            )
+            .await?
+        }
+        None => stakes::Venue::Own,
+    };
     sqlx::query(
         "INSERT INTO games (id, created_by, color_preference, rated, white_id, black_id, base_ms, increment_ms, status, fen,
-             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq, stake_minor, stake_asset, stake_path, funding_started_at)
+             white_remaining_ms, black_remaining_ms, white_lag_quota_ms, black_lag_quota_ms, turn_started_at_ms, started_at, event_seq, stake_minor, stake_asset, stake_path, funding_started_at, venue)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $17 THEN 'funding' ELSE 'active' END,$9,$10,$11,$12,$13,
                  CASE WHEN $17 THEN NULL ELSE $14 END, CASE WHEN $17 THEN NULL ELSE now() END,1,$15,$16,$18,
-                 CASE WHEN $17 THEN now() ELSE NULL END)",
+                 CASE WHEN $17 THEN now() ELSE NULL END,$19)",
     )
     .bind(id)
     .bind(first)
@@ -1002,6 +1053,7 @@ pub(crate) async fn start_matched(
     .bind(stake.map(|s| s.asset.to_string()))
     .bind(funding)
     .bind(path.as_str())
+    .bind(venue.as_str())
     .execute(&mut *db)
     .await?;
     Ok(id)

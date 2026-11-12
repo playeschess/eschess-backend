@@ -140,7 +140,7 @@ Decided 2026-11-12: games are played on lichess.org and we read the result. A te
 Status: in progress.
 1. Done (PR #51): a game has a venue; a Lichess game has no clock or moves on our server; its result is recorded once and settlement pays it like any other.
 2. Done: link a Lichess account to a user (login at Lichess, OAuth with PKCE, no permissions asked, the token ended at once, one account per player and one player per account). Tested against a fake Lichess; not yet tried against the real lichess.org.
-3. Create the game on Lichess for two matched players and watch for its result.
+3. Done (built, tested against a fake Lichess): staked games can be played on Lichess. A setting (`game_venue`, `own` by default) says where new staked games are played; on `lichess` both players need a linked account and a clock Lichess accepts. A worker makes a casual challenge only those two players can join, reads the finished game, and records the result once; a game nobody starts is a draw after 10 minutes and the stakes come back; cheating, odd endings and mismatched players are left for a person. A Lichess game is never paid until its moves are here to be scored (step 4), so the setting stays `own` until then.
 4. Fair-play data from Lichess (fetch the finished game, score it, check account flags).
 
 ## Later (not now)

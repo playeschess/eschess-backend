@@ -10,7 +10,9 @@ use axum::http::StatusCode;
 use common::*;
 use eschess_api::config::LichessConfig;
 use eschess_api::Config;
-use eschess_lichess::{AccessToken, Lichess, LichessAccount, LichessError};
+use eschess_lichess::{
+    AccessToken, Lichess, LichessAccount, LichessError, LichessGame, NewChallenge, OpenChallenge,
+};
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -54,6 +56,12 @@ impl Lichess for FakeLichess {
     async fn revoke(&self, token: &AccessToken) -> Result<(), LichessError> {
         self.revoked.lock().unwrap().push(token_text(token));
         Ok(())
+    }
+    async fn create_open_challenge(&self, _: &NewChallenge) -> Result<OpenChallenge, LichessError> {
+        unreachable!("linking never makes a game")
+    }
+    async fn game(&self, _: &str) -> Result<Option<LichessGame>, LichessError> {
+        unreachable!("linking never reads a game")
     }
 }
 

@@ -219,6 +219,8 @@ pub async fn enqueue(
     // players are paired, and checked again then.
     if let Some(stake) = stake {
         stakes::require_can_stake(&mut tx, user).await?;
+        // Staked games may be played on Lichess, which needs a linked account (ADR 0005); say so before queueing.
+        stakes::venue_for(&mut tx, &[user], base_ms as i64, increment_ms as i64).await?;
         if !stakes::can_cover(&mut tx, user, stake).await? {
             return Err(GameError::InsufficientFunds);
         }

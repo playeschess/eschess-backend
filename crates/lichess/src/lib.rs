@@ -111,6 +111,101 @@ impl fmt::Display for LichessError {
 }
 impl std::error::Error for LichessError {}
 
+/// A game we ask Lichess to host for exactly two players.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewChallenge {
+    /// Lichess usernames. Only these two can join; the first plays White.
+    pub white: String,
+    pub black: String,
+    pub clock_limit_secs: u32,
+    pub clock_increment_secs: u32,
+    pub rated: bool,
+    /// The challenge disappears by itself at this time (Unix milliseconds), so a game nobody starts leaves nothing behind.
+    pub expires_at_ms: i64,
+}
+
+/// The challenge Lichess made. Its id becomes the id of the game when both players have joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenChallenge {
+    pub id: String,
+    pub url: String,
+    pub url_white: String,
+    pub url_black: String,
+}
+
+/// How a Lichess game stands (`GameStatusName` in Lichess's API description).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameStatus {
+    Created,
+    Started,
+    Aborted,
+    NoStart,
+    Mate,
+    Resign,
+    Stalemate,
+    Timeout,
+    Draw,
+    OutOfTime,
+    /// Lichess ended the game because a player was found to be cheating.
+    Cheat,
+    UnknownFinish,
+    InsufficientMaterialClaim,
+    VariantEnd,
+    /// A status this code does not know. Never treated as a result.
+    Other(String),
+}
+
+impl GameStatus {
+    fn parse(s: &str) -> GameStatus {
+        match s {
+            "created" => GameStatus::Created,
+            "started" => GameStatus::Started,
+            "aborted" => GameStatus::Aborted,
+            "noStart" => GameStatus::NoStart,
+            "mate" => GameStatus::Mate,
+            "resign" => GameStatus::Resign,
+            "stalemate" => GameStatus::Stalemate,
+            "timeout" => GameStatus::Timeout,
+            "draw" => GameStatus::Draw,
+            "outoftime" => GameStatus::OutOfTime,
+            "cheat" => GameStatus::Cheat,
+            "unknownFinish" => GameStatus::UnknownFinish,
+            "insufficientMaterialClaim" => GameStatus::InsufficientMaterialClaim,
+            "variantEnd" => GameStatus::VariantEnd,
+            other => GameStatus::Other(other.to_string()),
+        }
+    }
+    /// The game is over, whatever the result.
+    pub fn is_over(&self) -> bool {
+        !matches!(
+            self,
+            GameStatus::Created | GameStatus::Started | GameStatus::Other(_)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    White,
+    Black,
+}
+
+/// A game as Lichess exports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LichessGame {
+    pub id: String,
+    pub status: GameStatus,
+    /// Absent for a draw, an abort, and a game still on.
+    pub winner: Option<Side>,
+    /// Half-moves played.
+    pub ply: i32,
+    /// Lowercase Lichess ids of the two players; `None` for an anonymous player or the computer.
+    pub white: Option<String>,
+    pub black: Option<String>,
+    pub variant: String,
+    pub rated: bool,
+}
+
 /// What we need from Lichess. A trait so tests (and the API) never depend on the real site.
 #[async_trait::async_trait]
 pub trait Lichess: Send + Sync {
@@ -126,6 +221,13 @@ pub trait Lichess: Send + Sync {
     async fn account(&self, token: &AccessToken) -> Result<LichessAccount, LichessError>;
     /// Ends the token. Called as soon as the account is known, so no usable token is left anywhere.
     async fn revoke(&self, token: &AccessToken) -> Result<(), LichessError>;
+    /// Creates a game for exactly two named players. Needs no login of ours and no token.
+    async fn create_open_challenge(
+        &self,
+        challenge: &NewChallenge,
+    ) -> Result<OpenChallenge, LichessError>;
+    /// The game with this id, or `None` if Lichess has no such game (yet: a challenge nobody has joined is not a game).
+    async fn game(&self, id: &str) -> Result<Option<LichessGame>, LichessError>;
 }
 
 /// The real lichess.org (or a stand-in server in tests, by `base`).
@@ -247,6 +349,116 @@ impl Lichess for HttpLichess {
             )))
         }
     }
+
+    async fn create_open_challenge(&self, c: &NewChallenge) -> Result<OpenChallenge, LichessError> {
+        let users = format!("{},{}", c.white, c.black);
+        let res = self
+            .http
+            .post(format!("{}/api/challenge/open", self.base))
+            .form(&[
+                ("variant", "standard".to_string()),
+                ("rated", c.rated.to_string()),
+                ("clock.limit", c.clock_limit_secs.to_string()),
+                ("clock.increment", c.clock_increment_secs.to_string()),
+                ("users", users),
+                ("expiresAt", c.expires_at_ms.to_string()),
+                ("name", "eschess staked game".to_string()),
+                ("rules", "noRematch".to_string()),
+            ])
+            .send()
+            .await
+            .map_err(unavailable)?;
+        let status = res.status();
+        let body: serde_json::Value = res.json().await.map_err(unavailable)?;
+        if status.is_client_error() {
+            let why = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the challenge was not accepted");
+            return Err(LichessError::Rejected(why.to_string()));
+        }
+        if !status.is_success() {
+            return Err(LichessError::Unavailable(format!("status {status}")));
+        }
+        // The answer is the challenge itself, or wraps it as `challenge`.
+        let ch = body.get("challenge").unwrap_or(&body);
+        let text = |k: &str| ch.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        match (text("id"), text("url")) {
+            (Some(id), Some(url)) => Ok(OpenChallenge {
+                url_white: text("urlWhite").unwrap_or_else(|| url.clone()),
+                url_black: text("urlBlack").unwrap_or_else(|| url.clone()),
+                id,
+                url,
+            }),
+            _ => Err(LichessError::Unavailable(
+                "the challenge had no id or url".into(),
+            )),
+        }
+    }
+
+    async fn game(&self, id: &str) -> Result<Option<LichessGame>, LichessError> {
+        if id.len() != 8 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(LichessError::Rejected("not a Lichess game id".into()));
+        }
+        let res = self
+            .http
+            .get(format!("{}/game/export/{id}", self.base))
+            .query(&[
+                ("moves", "true"),
+                ("tags", "false"),
+                ("clocks", "false"),
+                ("evals", "false"),
+            ])
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(unavailable)?;
+        let status = res.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(LichessError::Unavailable(format!("status {status}")));
+        }
+        let g: serde_json::Value = res.json().await.map_err(unavailable)?;
+        let text = |k: &str| g.get(k).and_then(|x| x.as_str());
+        let (Some(gid), Some(st)) = (text("id"), text("status")) else {
+            return Err(LichessError::Unavailable(
+                "the game had no id or status".into(),
+            ));
+        };
+        Ok(Some(LichessGame {
+            id: gid.to_string(),
+            status: GameStatus::parse(st),
+            winner: g.get("winner").and_then(side_of),
+            ply: ply_of(text("moves").unwrap_or("")),
+            white: player_id(&g, "white"),
+            black: player_id(&g, "black"),
+            variant: text("variant").unwrap_or("").to_string(),
+            rated: g.get("rated").and_then(|v| v.as_bool()).unwrap_or(false),
+        }))
+    }
+}
+
+fn ply_of(moves: &str) -> i32 {
+    moves.split_whitespace().count() as i32
+}
+
+fn side_of(v: &serde_json::Value) -> Option<Side> {
+    match v.as_str()? {
+        "white" => Some(Side::White),
+        "black" => Some(Side::Black),
+        _ => None,
+    }
+}
+
+fn player_id(game: &serde_json::Value, color: &str) -> Option<String> {
+    game.get("players")?
+        .get(color)?
+        .get("user")?
+        .get("id")?
+        .as_str()
+        .map(|s| s.to_ascii_lowercase())
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub mod contract_settle;
 pub mod expire;
 pub mod fairplay;
 pub mod funding;
+pub mod lichess_games;
 pub mod reconcile;
 pub mod sender;
 pub mod settle;

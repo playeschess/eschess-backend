@@ -60,6 +60,77 @@ pub async fn current_path(db: &mut PgConnection) -> Result<StakePath, sqlx::Erro
         .unwrap_or_default())
 }
 
+/// Where a staked game is played (ADR 0005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Venue {
+    /// Our own game server.
+    #[default]
+    Own,
+    /// lichess.org: both players need a linked Lichess account.
+    Lichess,
+}
+
+impl Venue {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Venue::Own => "own",
+            Venue::Lichess => "lichess",
+        }
+    }
+}
+
+/// The longest increment Lichess accepts for a challenge, in seconds.
+const LICHESS_MAX_INCREMENT_SECS: u64 = 60;
+
+/// Where a staked game made now is played, from the `game_venue` setting. Unreadable or unknown means our own server:
+/// Lichess is used only when plainly asked for.
+pub async fn current_venue(db: &mut PgConnection) -> Result<Venue, sqlx::Error> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM platform_settings WHERE name = 'game_venue'")
+            .fetch_optional(&mut *db)
+            .await?;
+    Ok(match value.as_deref() {
+        Some("lichess") => Venue::Lichess,
+        _ => Venue::Own,
+    })
+}
+
+/// The venue a staked game with these players and this clock would be played in, or why it cannot be played there: on
+/// Lichess every player must have a linked account, and the clock must be one Lichess accepts (whole seconds, an
+/// increment of at most a minute).
+pub async fn venue_for(
+    db: &mut PgConnection,
+    players: &[Uuid],
+    base_ms: i64,
+    increment_ms: i64,
+) -> Result<Venue, GameError> {
+    let venue = current_venue(db).await?;
+    if venue == Venue::Lichess {
+        if base_ms % 1000 != 0 || increment_ms % 1000 != 0 {
+            return Err(GameError::InvalidTimeControl(
+                "staked games are played in whole seconds",
+            ));
+        }
+        if increment_ms as u64 / 1000 > LICHESS_MAX_INCREMENT_SECS {
+            return Err(GameError::InvalidTimeControl(
+                "a staked game's increment is at most one minute",
+            ));
+        }
+        for player in players {
+            let linked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM lichess_links WHERE user_id = $1)",
+            )
+            .bind(player)
+            .fetch_one(&mut *db)
+            .await?;
+            if !linked {
+                return Err(GameError::LichessNotLinked);
+            }
+        }
+    }
+    Ok(venue)
+}
+
 /// What each player puts in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stake {
@@ -393,6 +464,18 @@ async fn decide(
     scorer: &str,
 ) -> Result<Result<Settled, Waiting>, GameError> {
     let (white, black) = (row.white, row.black);
+    // A game played on Lichess is only judged once its moves are here to be scored (ADR 0005, build step 4). Until
+    // then it waits, whatever the result: a payout must never skip the fair-play check because the data is missing.
+    let moves_missing: bool = sqlx::query_scalar(
+        "SELECT g.venue = 'lichess' AND g.ply > 0 AND (SELECT count(*) FROM game_moves m WHERE m.game_id = g.id) < g.ply \
+         FROM games g WHERE g.id = $1",
+    )
+    .bind(game)
+    .fetch_one(&mut *tx)
+    .await?;
+    if moves_missing {
+        return Ok(Err(Waiting::NotScored));
+    }
     let scored: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM fairplay_runs WHERE game_id = $1 AND scorer = $2)",
     )

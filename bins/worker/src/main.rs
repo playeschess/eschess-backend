@@ -29,6 +29,7 @@ async fn main() {
     spawn_fairplay(pool.clone());
     spawn_settle(pool.clone());
     spawn_expiry(pool.clone());
+    spawn_lichess_games(pool.clone());
 
     let Some(stellar) = config.stellar.clone() else {
         tracing::info!(
@@ -119,6 +120,39 @@ async fn main() {
         }
     }
     shutdown().await;
+}
+
+/// Staked games played on Lichess (ADR 0005): makes each game there and reads its result. Does nothing while no staked
+/// game is set to be played on Lichess (the `game_venue` setting).
+fn spawn_lichess_games(pool: sqlx::PgPool) {
+    let base = std::env::var("LICHESS_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://lichess.org".into());
+    let lichess = eschess_lichess::HttpLichess::new(base.trim());
+    tokio::spawn(async move {
+        loop {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after 1970")
+                .as_millis() as i64;
+            match eschess_worker::lichess_games::tick(
+                &pool,
+                &lichess,
+                now_ms,
+                eschess_worker::lichess_games::Config::default(),
+            )
+            .await
+            {
+                Ok(r) if r.created + r.finished + r.no_shows + r.held > 0 => {
+                    tracing::info!("lichess games: {r:?}")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("lichess games round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
 }
 
 /// Staked games nobody joins are cancelled, and the stake returned, after STAKED_GAME_WAIT_SECS (default 10 minutes).
