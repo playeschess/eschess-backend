@@ -153,6 +153,11 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "that client_move_id was already used for a different move",
             ),
             InvalidTimeControl(why) => ApiError::Validation(why.to_string()),
+            LichessNotLinked => ApiError::Coded(
+                StatusCode::CONFLICT,
+                "lichess_not_linked",
+                "link your Lichess account before staking: staked games are played on Lichess".into(),
+            ),
             EmailNotConfirmed => ApiError::Coded(
                 StatusCode::FORBIDDEN,
                 "email_not_confirmed",

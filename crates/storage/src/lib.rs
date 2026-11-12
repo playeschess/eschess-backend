@@ -6,6 +6,7 @@ pub mod games;
 pub mod identity;
 pub mod ledger;
 pub mod lichess;
+pub mod lichess_games;
 pub mod matchmaking;
 pub mod ratings;
 pub mod reconcile;

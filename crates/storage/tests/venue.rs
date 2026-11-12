@@ -101,6 +101,15 @@ async fn settle(pool: &PgPool, game: Uuid) -> Result<Settled, Waiting> {
     stakes::settle(pool, game, SCORER, 0).await.unwrap()
 }
 
+/// Puts `n` moves into the game, as if they had been fetched from Lichess.
+async fn with_moves(pool: &PgPool, game: Uuid, white: Uuid, black: Uuid, n: i32) {
+    for ply in 1..=n {
+        sqlx::query("INSERT INTO game_moves (game_id, ply, uci, fen_after, mover_id, client_move_id, charged_ms, credited_ms, remaining_ms_after, played_at_ms) VALUES ($1, $2, 'e2e4', 'x', $3, $4, 1000, 0, 1000, $2)")
+            .bind(game).bind(ply).bind(if ply % 2 == 1 { white } else { black }).bind(Uuid::now_v7())
+            .execute(pool).await.unwrap();
+    }
+}
+
 const LICHESS: &str = "AbCd1234";
 
 fn played_elsewhere<T: std::fmt::Debug>(r: Result<T, GameError>) -> bool {
@@ -234,9 +243,11 @@ async fn a_result_from_lichess_is_recorded_once_and_then_settles_like_any_other(
         "a different result is refused"
     );
 
-    // No moves are held here yet, so the scorer has not run: the pot waits, as it does for any game.
-    assert_eq!(settle(&pool, game).await, Err(Waiting::NotScored));
+    // Its moves are not here yet (they are imported for scoring in a later step), so the pot waits even if a scorer run
+    // were recorded: a payout never skips the fair-play check because the data is missing.
     scored(&pool, game, &[w, b]).await;
+    assert_eq!(settle(&pool, game).await, Err(Waiting::NotScored));
+    with_moves(&pool, game, w, b, 44).await;
     assert_eq!(
         settle(&pool, game).await,
         Ok(Settled::Paid {
@@ -270,6 +281,7 @@ async fn a_short_or_drawn_lichess_game_returns_the_stakes(pool: PgPool) {
         games::finish_external(&pool, game, result, "x", ply)
             .await
             .unwrap();
+        with_moves(&pool, game, w, b, ply).await;
         scored(&pool, game, &[w, b]).await;
         assert_eq!(settle(&pool, game).await, Ok(Settled::Returned));
         assert_eq!(
@@ -277,4 +289,174 @@ async fn a_short_or_drawn_lichess_game_returns_the_stakes(pool: PgPool) {
             (1_000, 1_000)
         );
     }
+}
+
+async fn lichess_on(pool: &PgPool) {
+    sqlx::query("UPDATE platform_settings SET value = 'lichess' WHERE name = 'game_venue'")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn link(pool: &PgPool, user: Uuid, name: &str) {
+    eschess_storage::lichess::save(pool, user, name, name)
+        .await
+        .unwrap();
+}
+
+async fn venue_of(pool: &PgPool, game: Uuid) -> (String, Option<String>) {
+    sqlx::query_as("SELECT venue, lichess_game_id FROM games WHERE id = $1")
+        .bind(game)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn staked_games_start_on_lichess_only_for_linked_players_and_a_clock_it_accepts(
+    pool: PgPool,
+) {
+    // By default games are played on our server and no account is needed.
+    let (before, w, b) = started(&pool).await;
+    assert_eq!(venue_of(&pool, before).await.0, "own");
+
+    lichess_on(&pool).await;
+    let (ada, grace) = (player(&pool, 1_000).await, player(&pool, 1_000).await);
+    // Creating or joining needs a linked account, and nothing is held for a refused attempt.
+    assert!(matches!(
+        games::create_game(&pool, ada, 300_000, 0, "white", true, Some(&stake(400))).await,
+        Err(GameError::LichessNotLinked)
+    ));
+    link(&pool, ada, "ada").await;
+    assert!(
+        matches!(
+            games::create_game(&pool, ada, 300_500, 0, "white", true, Some(&stake(400))).await,
+            Err(GameError::InvalidTimeControl(_))
+        ),
+        "whole seconds only"
+    );
+    assert!(
+        matches!(
+            games::create_game(
+                &pool,
+                ada,
+                300_000,
+                61_000,
+                "white",
+                true,
+                Some(&stake(400))
+            )
+            .await,
+            Err(GameError::InvalidTimeControl(_))
+        ),
+        "an increment over a minute"
+    );
+    let game = games::create_game(&pool, ada, 300_000, 2_000, "white", true, Some(&stake(400)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        games::join_game(&pool, game, grace, true).await,
+        Err(GameError::LichessNotLinked)
+    ));
+    assert_eq!(
+        wallet(&pool, grace).await,
+        1_000,
+        "the refused join held nothing"
+    );
+    link(&pool, grace, "grace").await;
+    games::join_game(&pool, game, grace, true).await.unwrap();
+    assert_eq!(
+        venue_of(&pool, before).await.0,
+        "own",
+        "a game that started before the switch stays where it was"
+    );
+    assert_eq!(venue_of(&pool, game).await, ("lichess".to_string(), None));
+
+    // The game that started before the switch stays where it was, and the new one cannot be played here.
+    assert_eq!(
+        venue_of(&pool, started_before(&pool, w, b).await).await.0,
+        "lichess"
+    );
+    let moved = games::play_move(
+        &pool,
+        game,
+        ada,
+        "e2e4",
+        Uuid::now_v7(),
+        games::Transport::Http,
+    )
+    .await;
+    assert!(played_elsewhere(moved));
+}
+
+/// A game between two players made after the switch (they are linked here).
+async fn started_before(pool: &PgPool, w: Uuid, b: Uuid) -> Uuid {
+    link(pool, w, "whitey").await;
+    link(pool, b, "blacky").await;
+    let game = games::create_game(pool, w, 300_000, 0, "white", true, Some(&stake(400)))
+        .await
+        .unwrap();
+    games::join_game(pool, game, b, true).await.unwrap();
+    game
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn the_lichess_game_is_filled_in_once_and_the_venue_never_goes_back(pool: PgPool) {
+    lichess_on(&pool).await;
+    let (w, b) = (player(&pool, 1_000).await, player(&pool, 1_000).await);
+    let game = started_before(&pool, w, b).await;
+
+    let todo = eschess_storage::lichess_games::to_create(&pool, 10)
+        .await
+        .unwrap();
+    assert_eq!(todo.len(), 1);
+    assert_eq!(
+        (todo[0].id, todo[0].white.as_str(), todo[0].black.as_str()),
+        (game, "whitey", "blacky")
+    );
+
+    let expires = 4_000_000_000_000;
+    assert!(
+        eschess_storage::lichess_games::set_challenge(&pool, game, LICHESS, expires)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !eschess_storage::lichess_games::set_challenge(&pool, game, "ZzZz9999", expires)
+            .await
+            .unwrap(),
+        "already made"
+    );
+    assert!(eschess_storage::lichess_games::to_create(&pool, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    let playing = eschess_storage::lichess_games::in_play(&pool, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            playing.len(),
+            playing[0].lichess_game_id.as_str(),
+            playing[0].challenge_expired
+        ),
+        (1, LICHESS, false)
+    );
+
+    assert!(
+        sqlx::query("UPDATE games SET venue = 'own', lichess_game_id = NULL WHERE id = $1")
+            .bind(game)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE games SET lichess_game_id = 'ZzZz9999' WHERE id = $1")
+            .bind(game)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
 }

@@ -15,6 +15,7 @@ live-testnet = []
 eschess-api = { path = "../api" }
 eschess-domain = { path = "../../crates/domain" }
 eschess-fairplay = { path = "../../crates/fairplay" }
+eschess-lichess = { path = "../../crates/lichess" }
 eschess-storage = { path = "../../crates/storage" }
 eschess-stellar = { path = "../../crates/stellar" }
 sqlx.workspace = true

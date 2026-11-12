@@ -1,6 +1,8 @@
 //! `HttpLichess` against a stand-in server on this machine: what it sends, and how it reads the answers.
 
-use eschess_lichess::{AccessToken, HttpLichess, Lichess, LichessError};
+use eschess_lichess::{
+    AccessToken, GameStatus, HttpLichess, Lichess, LichessError, NewChallenge, Side,
+};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -126,4 +128,73 @@ async fn a_refused_code_is_a_refusal_and_a_server_error_is_not() {
             .await,
         Err(LichessError::Unavailable(_))
     ));
+}
+
+#[tokio::test]
+async fn a_challenge_for_two_named_players_is_made_and_a_game_is_read_back() {
+    let (base, seen) = serve(vec![
+        (
+            "POST /api/challenge/open",
+            200,
+            r#"{"id":"AbCd1234","url":"https://lichess.org/AbCd1234","urlWhite":"https://lichess.org/AbCd1234?color=white","urlBlack":"https://lichess.org/AbCd1234?color=black"}"#,
+        ),
+        (
+            "GET /game/export/AbCd1234?moves=true&tags=false&clocks=false&evals=false",
+            200,
+            r#"{"id":"AbCd1234","rated":false,"variant":"standard","status":"resign","winner":"black","moves":"e2e4 e7e5 g1f3 b8c6","players":{"white":{"user":{"name":"Ada","id":"ada"}},"black":{"user":{"name":"Grace","id":"grace"}}}}"#,
+        ),
+        ("GET /game/export/Missing1?moves=true&tags=false&clocks=false&evals=false", 404, "{}"),
+    ])
+    .await;
+    let l = HttpLichess::new(&base);
+    let c = l
+        .create_open_challenge(&NewChallenge {
+            white: "ada".into(),
+            black: "grace".into(),
+            clock_limit_secs: 600,
+            clock_increment_secs: 5,
+            rated: false,
+            expires_at_ms: 1_800_000_000_000,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (c.id.as_str(), c.url_black.as_str()),
+        ("AbCd1234", "https://lichess.org/AbCd1234?color=black")
+    );
+    let sent = seen.lock().unwrap()[0].clone();
+    for want in [
+        "users=ada%2Cgrace",
+        "clock.limit=600",
+        "clock.increment=5",
+        "rated=false",
+        "expiresAt=1800000000000",
+        "variant=standard",
+    ] {
+        assert!(sent.contains(want), "{want} missing from {sent}");
+    }
+
+    let g = l.game("AbCd1234").await.unwrap().unwrap();
+    assert_eq!(g.status, GameStatus::Resign);
+    assert!(g.status.is_over());
+    assert_eq!((g.winner, g.ply), (Some(Side::Black), 4));
+    assert_eq!(
+        (g.white.as_deref(), g.black.as_deref()),
+        (Some("ada"), Some("grace"))
+    );
+    assert!(
+        l.game("Missing1").await.unwrap().is_none(),
+        "a game Lichess does not have is None"
+    );
+    assert!(matches!(
+        l.game("../etc").await,
+        Err(LichessError::Rejected(_))
+    ));
+}
+
+#[test]
+fn an_unknown_status_is_never_a_finished_game() {
+    assert!(!GameStatus::Other("brandNew".into()).is_over());
+    assert!(!GameStatus::Started.is_over());
+    assert!(GameStatus::Aborted.is_over() && GameStatus::Cheat.is_over());
 }

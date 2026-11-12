@@ -714,6 +714,7 @@ dependencies = [
  "eschess-domain",
  "eschess-fairplay",
  "eschess-ledger",
+ "eschess-lichess",
  "eschess-stellar",
  "eschess-storage",
  "futures",
