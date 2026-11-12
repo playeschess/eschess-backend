@@ -137,9 +137,9 @@ Decided 2026-11-12: games are played on lichess.org and we read the result. A te
 
 ### Step 5b. Lichess as the game venue
 
-Status: not started.
-1. Put the game result behind a swappable source (our server or Lichess).
-2. Link a Lichess account to a user (OAuth).
+Status: in progress.
+1. Done (PR #51): a game has a venue; a Lichess game has no clock or moves on our server; its result is recorded once and settlement pays it like any other.
+2. Done: link a Lichess account to a user (login at Lichess, OAuth with PKCE, no permissions asked, the token ended at once, one account per player and one player per account). Tested against a fake Lichess; not yet tried against the real lichess.org.
 3. Create the game on Lichess for two matched players and watch for its result.
 4. Fair-play data from Lichess (fetch the finished game, score it, check account flags).
 

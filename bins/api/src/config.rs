@@ -38,6 +38,46 @@ pub struct Config {
     /// A file holding the master key that seals users' wallet keys (testnet only; see ADR 0006). `None` (the default)
     /// means players get no wallet of their own.
     pub wallet_master_key_file: Option<String>,
+    /// Linking players' Lichess accounts (ADR 0005). `None` (the default) means the routes answer "not available".
+    pub lichess: Option<LichessConfig>,
+}
+
+/// Lichess login settings.
+#[derive(Clone, Debug)]
+pub struct LichessConfig {
+    /// Any unique name for this application; Lichess needs no registration for public clients.
+    pub client_id: String,
+    /// Where Lichess sends the player back: a page of the web app, which then calls `/v1/lichess/link/finish`.
+    pub redirect_uri: String,
+    /// `https://lichess.org`, or a stand-in server in tests.
+    pub base_url: String,
+    /// How long a login attempt stays valid.
+    pub attempt_ttl_secs: i64,
+}
+
+fn lichess_from(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<LichessConfig>, String> {
+    let Some(redirect_uri) = get("LICHESS_REDIRECT_URI").filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let redirect_uri = redirect_uri.trim().to_string();
+    if !redirect_uri.starts_with("https://")
+        && !redirect_uri.starts_with("http://127.0.0.1")
+        && !redirect_uri.starts_with("http://localhost")
+    {
+        return Err("LICHESS_REDIRECT_URI must be an https:// address".into());
+    }
+    let pick = |name: &str, default: &str| {
+        get(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    Ok(Some(LichessConfig {
+        client_id: pick("LICHESS_CLIENT_ID", "eschess"),
+        redirect_uri,
+        base_url: pick("LICHESS_URL", "https://lichess.org"),
+        attempt_ttl_secs: 600,
+    }))
 }
 
 impl Config {
@@ -182,6 +222,7 @@ impl Default for Config {
             stellar: None,
             stakes_minor: Vec::new(),
             wallet_master_key_file: None,
+            lichess: None,
             ws_hello_timeout_ms: 5_000,
             ws_ping_interval_ms: 10_000,
             ws_pong_timeout_ms: 30_000,
@@ -302,6 +343,7 @@ impl Config {
             wallet_assets,
             stellar,
             stakes_minor,
+            lichess: lichess_from(get)?,
             wallet_master_key_file: get("WALLET_MASTER_KEY_FILE")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),

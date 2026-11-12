@@ -28,6 +28,8 @@ pub struct AppState {
     /// Seals and opens users' wallet keys (ADR 0006). `None` while no master key is configured: players then have no
     /// wallet of their own yet, and nothing else is affected.
     pub vault: Option<Arc<dyn eschess_stellar::custody::KeyVault>>,
+    /// Lichess login, to link a player's Lichess account (ADR 0005). `None` while `config.lichess` is off.
+    pub lichess: Option<Arc<dyn eschess_lichess::Lichess>>,
 }
 
 /// The API's routes. Kept separate from `main` so tests can call it without opening a network port.
@@ -63,6 +65,9 @@ pub fn app(state: AppState) -> Router {
                 .get(routes::matchmaking::status)
                 .delete(routes::matchmaking::leave),
         )
+        .route("/v1/lichess", get(routes::lichess::status))
+        .route("/v1/lichess/link/start", post(routes::lichess::start))
+        .route("/v1/lichess/link/finish", post(routes::lichess::finish))
         .route("/v1/wallet/deposit-info", get(routes::wallet::deposit_info))
         .route("/v1/wallet/deposits", get(routes::wallet::deposits))
         .route(
@@ -176,6 +181,7 @@ mod tests {
             hub: hub::Hub::new(),
             chain: None,
             vault: None,
+            lichess: None,
         }
     }
 
