@@ -199,6 +199,11 @@ pub struct LichessGame {
     pub winner: Option<Side>,
     /// Half-moves played.
     pub ply: i32,
+    /// The moves in standard algebraic notation (`e4`, `Nbd7`, `O-O`), in order.
+    pub moves: Vec<String>,
+    /// What each mover's clock showed after each move, in centiseconds (`clocks[i]` is after `moves[i]`). Empty when Lichess
+    /// gave none.
+    pub clocks_cs: Vec<i64>,
     /// Lowercase Lichess ids of the two players; `None` for an anonymous player or the computer.
     pub white: Option<String>,
     pub black: Option<String>,
@@ -406,7 +411,7 @@ impl Lichess for HttpLichess {
             .query(&[
                 ("moves", "true"),
                 ("tags", "false"),
-                ("clocks", "false"),
+                ("clocks", "true"),
                 ("evals", "false"),
             ])
             .header("Accept", "application/json")
@@ -427,11 +432,18 @@ impl Lichess for HttpLichess {
                 "the game had no id or status".into(),
             ));
         };
+        let moves: Vec<String> = text("moves")
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         Ok(Some(LichessGame {
             id: gid.to_string(),
             status: GameStatus::parse(st),
             winner: g.get("winner").and_then(side_of),
-            ply: ply_of(text("moves").unwrap_or("")),
+            ply: moves.len() as i32,
+            moves,
+            clocks_cs: clocks_of(&g),
             white: player_id(&g, "white"),
             black: player_id(&g, "black"),
             variant: text("variant").unwrap_or("").to_string(),
@@ -440,8 +452,11 @@ impl Lichess for HttpLichess {
     }
 }
 
-fn ply_of(moves: &str) -> i32 {
-    moves.split_whitespace().count() as i32
+fn clocks_of(game: &serde_json::Value) -> Vec<i64> {
+    game.get("clocks")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default()
 }
 
 fn side_of(v: &serde_json::Value) -> Option<Side> {

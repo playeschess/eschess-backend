@@ -139,11 +139,11 @@ async fn a_challenge_for_two_named_players_is_made_and_a_game_is_read_back() {
             r#"{"id":"AbCd1234","url":"https://lichess.org/AbCd1234","urlWhite":"https://lichess.org/AbCd1234?color=white","urlBlack":"https://lichess.org/AbCd1234?color=black"}"#,
         ),
         (
-            "GET /game/export/AbCd1234?moves=true&tags=false&clocks=false&evals=false",
+            "GET /game/export/AbCd1234?moves=true&tags=false&clocks=true&evals=false",
             200,
-            r#"{"id":"AbCd1234","rated":false,"variant":"standard","status":"resign","winner":"black","moves":"e2e4 e7e5 g1f3 b8c6","players":{"white":{"user":{"name":"Ada","id":"ada"}},"black":{"user":{"name":"Grace","id":"grace"}}}}"#,
+            r#"{"id":"AbCd1234","rated":false,"variant":"standard","status":"resign","winner":"black","moves":"e4 e5 Nf3 Nc6","clocks":[30000,30000,29800,29700],"players":{"white":{"user":{"name":"Ada","id":"ada"}},"black":{"user":{"name":"Grace","id":"grace"}}}}"#,
         ),
-        ("GET /game/export/Missing1?moves=true&tags=false&clocks=false&evals=false", 404, "{}"),
+        ("GET /game/export/Missing1?moves=true&tags=false&clocks=true&evals=false", 404, "{}"),
     ])
     .await;
     let l = HttpLichess::new(&base);
@@ -178,6 +178,8 @@ async fn a_challenge_for_two_named_players_is_made_and_a_game_is_read_back() {
     assert_eq!(g.status, GameStatus::Resign);
     assert!(g.status.is_over());
     assert_eq!((g.winner, g.ply), (Some(Side::Black), 4));
+    assert_eq!(g.moves, ["e4", "e5", "Nf3", "Nc6"]);
+    assert_eq!(g.clocks_cs, [30000, 30000, 29800, 29700]);
     assert_eq!(
         (g.white.as_deref(), g.black.as_deref()),
         (Some("ada"), Some("grace"))

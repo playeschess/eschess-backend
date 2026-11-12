@@ -82,9 +82,9 @@ Rules to design (not decided here):
   A mark appearing after payout cannot be undone, so settlement keeps waiting for the fair-play check as today.
 - **Collusion** (losing on purpose) exists in both options and needs its own rules.
 
-Built so far (see `plan.md`): the venue and result plumbing, account linking, and creating and watching the game. The
+Built so far (see `plan.md`): the venue and result plumbing, account linking, creating and watching the game, and importing the finished game's moves and clocks for fair play. The
 setting `game_venue` (`own` or `lichess`, in `platform_settings`) says where new staked games are played; it stays `own`
-until step 4 is done. Decisions taken while building: games are **casual** on Lichess (a rated game would move the
+until the real-Lichess trial and the scorer check listed in `plan.md` are done. Decisions taken while building: games are **casual** on Lichess (a rated game would move the
 players' Lichess ratings for our stakes); only restricted open challenges are used (`users=White,Black`, no token of ours);
 the challenge expires by itself after 10 minutes and a game not started by then is a draw that returns the stakes; a game
 Lichess ended for cheating is held for a person, not paid.

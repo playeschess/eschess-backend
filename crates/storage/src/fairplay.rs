@@ -1075,3 +1075,42 @@ pub async fn decide_appeal(
     tx.commit().await?;
     Ok(())
 }
+
+/// A third party, not our scorer, says this player cheated in this game (Lichess ended the game for it, ADR 0005). Records
+/// the finding as a maximum score by `scorer` and opens, or adds the game to, the player's review case, so a person decides.
+/// Nothing is paid on the finding alone. Safe to repeat: the second call changes nothing. Returns the case.
+pub async fn record_external_flag(
+    pool: &PgPool,
+    game: Uuid,
+    player: Uuid,
+    scorer: &str,
+    summary: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("INSERT INTO fairplay_runs (game_id, scorer, outcome) VALUES ($1, $2, 'scored') ON CONFLICT DO NOTHING")
+        .bind(game)
+        .bind(scorer)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO fairplay_scores (game_id, player_id, scorer, score, summary) VALUES ($1, $2, $3, 100, $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(game)
+    .bind(player)
+    .bind(scorer)
+    .bind(summary)
+    .execute(&mut *tx)
+    .await?;
+    let case = open_case_for(&mut tx, player).await?;
+    sqlx::query(
+        "INSERT INTO fairplay_case_games (case_id, game_id, player_id, scorer) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(case)
+    .bind(game)
+    .bind(player)
+    .bind(scorer)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(case)
+}
