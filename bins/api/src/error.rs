@@ -203,6 +203,10 @@ impl From<eschess_storage::games::GameError> for ApiError {
                 "illegal_move",
                 "that move is not legal in this position".into(),
             ),
+            Refused(Refusal::PlayedElsewhere) => conflict(
+                "played_on_lichess",
+                "this game is played on Lichess; make your moves there",
+            ),
             Refused(other) => ApiError::internal(other),
             Database(e) => ApiError::internal(e),
         }

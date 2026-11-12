@@ -159,6 +159,8 @@ pub enum Refusal {
     OwnDrawOffer,
     /// The stored game cannot be replayed: a bug or corrupted data, never the player's fault.
     CorruptHistory,
+    /// The game is played on Lichess: our server runs no clock and takes no moves, resignations or draw offers for it.
+    PlayedElsewhere,
     Clock(ClockError),
 }
 
@@ -180,6 +182,7 @@ impl fmt::Display for Refusal {
             Refusal::NoDrawOffer => write!(f, "there is no draw offer to answer"),
             Refusal::OwnDrawOffer => write!(f, "you cannot accept your own draw offer"),
             Refusal::CorruptHistory => write!(f, "the stored game history is not valid"),
+            Refusal::PlayedElsewhere => write!(f, "this game is played on Lichess"),
             Refusal::Clock(e) => write!(f, "{e}"),
         }
     }

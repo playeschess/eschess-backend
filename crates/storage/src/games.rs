@@ -255,12 +255,16 @@ async fn now_ms(db: &mut PgConnection) -> Result<i64> {
 
 async fn load_locked(db: &mut PgConnection, id: Uuid) -> Result<GameRow> {
     let r = sqlx::query(&format!(
-        "SELECT {COLS} FROM games WHERE id = $1 FOR UPDATE"
+        "SELECT {COLS}, venue FROM games WHERE id = $1 FOR UPDATE"
     ))
     .bind(id)
     .fetch_optional(&mut *db)
     .await?
     .ok_or(GameError::NotFound)?;
+    // A game played on Lichess has no clock or moves here: every action that locks a game for play stops at this door.
+    if r.get::<String, _>("venue") != "own" {
+        return Err(GameError::Refused(Refusal::PlayedElsewhere));
+    }
     Ok(row_from(&r))
 }
 
@@ -939,7 +943,7 @@ pub async fn flag_due(pool: &PgPool, id: Uuid) -> Result<bool> {
         "SELECT (extract(epoch from clock_timestamp()) * 1000)::bigint >=
                 turn_started_at_ms + CASE WHEN ply % 2 = 0 THEN white_remaining_ms ELSE black_remaining_ms END
                 + LEAST($2::bigint, CASE WHEN ply % 2 = 0 THEN white_lag_quota_ms ELSE black_lag_quota_ms END)
-         FROM games WHERE id = $1 AND status = 'active'",
+         FROM games WHERE id = $1 AND status = 'active' AND venue = 'own'",
     )
     .bind(id)
     .bind(LagPolicy::default().max_credit_per_move_ms as i64)
@@ -1089,6 +1093,88 @@ pub async fn cancel_funding(pool: &PgPool, id: Uuid) -> Result<bool> {
         }
     }
     notify(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// The Lichess game for one of our games has been created: record its id, so its result can be read later. The game
+/// must be `funding` or `active` with no move played on our server. After this, our server runs no clock and takes no
+/// moves for the game. Returns `false` if it was already attached to this same Lichess game (a repeat changes nothing);
+/// any other attempt (a different Lichess game, a game with moves, a finished game) is refused.
+pub async fn attach_lichess_game(pool: &PgPool, id: Uuid, lichess_game_id: &str) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let r = sqlx::query(
+        "SELECT venue, lichess_game_id, status, ply FROM games WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(GameError::NotFound)?;
+    let venue: String = r.get("venue");
+    let attached: Option<String> = r.get("lichess_game_id");
+    if venue == "lichess" {
+        return if attached.as_deref() == Some(lichess_game_id) {
+            Ok(false)
+        } else {
+            Err(GameError::Refused(Refusal::PlayedElsewhere))
+        };
+    }
+    let status: String = r.get("status");
+    let ply: i32 = r.get("ply");
+    if !matches!(status.as_str(), "funding" | "active") || ply != 0 {
+        return Err(GameError::Refused(Refusal::GameOver));
+    }
+    sqlx::query("UPDATE games SET venue = 'lichess', lichess_game_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(lichess_game_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Records the result of a game played on Lichess, once. `result` is `white`, `black` or `draw`; `ply` is the number of
+/// half-moves played (settlement returns the stakes of a game too short to count). Nothing is rated: ratings are ours.
+/// Returns `false` if the same result was already recorded; a different result for a finished game, or a game that is
+/// not a Lichess game in play, is refused. Settlement then reads the game as it does any other finished one.
+pub async fn finish_external(
+    pool: &PgPool,
+    id: Uuid,
+    result: &str,
+    end_reason: &str,
+    ply: i32,
+) -> Result<bool> {
+    if !matches!(result, "white" | "black" | "draw") || ply < 0 {
+        return Err(GameError::Refused(Refusal::Illegal));
+    }
+    let mut tx = pool.begin().await?;
+    let r = sqlx::query("SELECT venue, status, result FROM games WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(GameError::NotFound)?;
+    if r.get::<String, _>("venue") != "lichess" {
+        return Err(GameError::Refused(Refusal::NotAPlayer));
+    }
+    let status: String = r.get("status");
+    if status == "finished" {
+        return if r.get::<Option<String>, _>("result").as_deref() == Some(result) {
+            Ok(false)
+        } else {
+            Err(GameError::Refused(Refusal::GameOver))
+        };
+    }
+    if status != "active" {
+        return Err(GameError::Refused(Refusal::GameOver));
+    }
+    notify(&mut tx, id).await?;
+    sqlx::query("UPDATE games SET status = 'finished', result = $2, end_reason = $3, ply = $4, ended_at = now(), draw_offered_by = NULL, event_seq = event_seq + 1 WHERE id = $1")
+        .bind(id)
+        .bind(result)
+        .bind(end_reason)
+        .bind(ply)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(true)
 }
