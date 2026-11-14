@@ -130,6 +130,20 @@ fn spawn_lichess_games(pool: sqlx::PgPool) {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "https://lichess.org".into());
     let lichess = eschess_lichess::HttpLichess::new(base.trim());
+    // How long two players have to start a game before it is a no-show: 10 minutes unless LICHESS_START_WINDOW_SECS says
+    // otherwise (60 seconds to an hour; shorter is for trying it out).
+    let start_window_secs = match std::env::var("LICHESS_START_WINDOW_SECS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        None => eschess_worker::lichess_games::Config::default().start_window_secs,
+        Some(v) => v
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| (60..=3600).contains(n))
+            .unwrap_or_else(|| panic!("LICHESS_START_WINDOW_SECS must be 60 to 3600, not {v:?}")),
+    };
     tokio::spawn(async move {
         loop {
             let now_ms = std::time::SystemTime::now()
@@ -140,7 +154,7 @@ fn spawn_lichess_games(pool: sqlx::PgPool) {
                 &pool,
                 &lichess,
                 now_ms,
-                eschess_worker::lichess_games::Config::default(),
+                eschess_worker::lichess_games::Config { start_window_secs },
             )
             .await
             {
