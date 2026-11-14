@@ -365,7 +365,7 @@ async fn a_fee_bump_wrapper_is_refused() {
     let player = Player::new(5);
     let m = Make::valid(player.public_key());
     let TransactionEnvelope::Tx(inner) =
-        TransactionEnvelope::from_xdr_base64(&m.xdr(), Limits::none()).unwrap()
+        TransactionEnvelope::from_xdr_base64(m.xdr(), Limits::none()).unwrap()
     else {
         panic!()
     };
