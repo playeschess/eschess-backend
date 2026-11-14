@@ -40,6 +40,49 @@ pub struct Config {
     pub wallet_master_key_file: Option<String>,
     /// Linking players' Lichess accounts (ADR 0005). `None` (the default) means the routes answer "not available".
     pub lichess: Option<LichessConfig>,
+    /// The Stellar anchor for adding money from, and cashing out to, the player's own currency. `None` (the default) is off.
+    pub fiat: Option<FiatConfig>,
+}
+
+/// The anchor for fiat in and out.
+#[derive(Clone, Debug)]
+pub struct FiatConfig {
+    /// The anchor's home domain, e.g. `testanchor.stellar.org`. Its `stellar.toml` tells us everything else.
+    pub domain: String,
+    /// Where that `stellar.toml` is read from: `https://<domain>` unless a stand-in server is named.
+    pub toml_base: String,
+}
+
+fn fiat_from(
+    get: &dyn Fn(&str) -> Option<String>,
+    stellar: &Option<StellarConfig>,
+) -> Result<Option<FiatConfig>, String> {
+    let Some(domain) = get("FIAT_ANCHOR_DOMAIN")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    if stellar.is_none() {
+        return Err(
+            "FIAT_ANCHOR_DOMAIN needs Stellar to be configured (the anchor pays and takes USDC)"
+                .into(),
+        );
+    }
+    if domain.contains('/') || domain.contains(' ') {
+        return Err("FIAT_ANCHOR_DOMAIN is a domain such as testanchor.stellar.org, without https:// or a path".into());
+    }
+    let toml_base = get("FIAT_ANCHOR_URL")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("https://{domain}"));
+    if !toml_base.starts_with("https://")
+        && !toml_base.starts_with("http://127.0.0.1")
+        && !toml_base.starts_with("http://localhost")
+    {
+        return Err("FIAT_ANCHOR_URL must be an https:// address".into());
+    }
+    Ok(Some(FiatConfig { domain, toml_base }))
 }
 
 /// Lichess login settings.
@@ -223,6 +266,7 @@ impl Default for Config {
             stakes_minor: Vec::new(),
             wallet_master_key_file: None,
             lichess: None,
+            fiat: None,
             ws_hello_timeout_ms: 5_000,
             ws_ping_interval_ms: 10_000,
             ws_pong_timeout_ms: 30_000,
@@ -322,6 +366,7 @@ impl Config {
         };
         let stellar = stellar_from(get)?;
         let stakes_minor = stakes_from(get, &stellar)?;
+        let fiat = fiat_from(get, &stellar)?;
         let mut wallet_assets = wallet_assets;
         // With Stellar on, new players get a USDC wallet too (unless the list was set explicitly).
         if let Some(st) = &stellar {
@@ -344,6 +389,7 @@ impl Config {
             stellar,
             stakes_minor,
             lichess: lichess_from(get)?,
+            fiat,
             wallet_master_key_file: get("WALLET_MASTER_KEY_FILE")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
@@ -416,6 +462,40 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Config::from_lookup(&|name| map.get(name).cloned())
+    }
+
+    #[test]
+    fn the_fiat_anchor_is_off_unless_named_and_needs_stellar_and_a_plain_domain() {
+        assert!(load(&[]).unwrap().fiat.is_none());
+        let on = load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("FIAT_ANCHOR_DOMAIN", "testanchor.stellar.org"),
+        ])
+        .unwrap();
+        let f = on.fiat.unwrap();
+        assert_eq!(
+            (f.domain.as_str(), f.toml_base.as_str()),
+            ("testanchor.stellar.org", "https://testanchor.stellar.org")
+        );
+        // Without Stellar, with a URL for a domain, or with a plain-http stand-in elsewhere: refused.
+        assert!(load(&[("FIAT_ANCHOR_DOMAIN", "testanchor.stellar.org")]).is_err());
+        assert!(load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("FIAT_ANCHOR_DOMAIN", "https://testanchor.stellar.org")
+        ])
+        .is_err());
+        assert!(load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("FIAT_ANCHOR_DOMAIN", "a.example"),
+            ("FIAT_ANCHOR_URL", "http://a.example")
+        ])
+        .is_err());
+        assert!(load(&[
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("FIAT_ANCHOR_DOMAIN", "a.example"),
+            ("FIAT_ANCHOR_URL", "http://127.0.0.1:9000")
+        ])
+        .is_ok());
     }
 
     #[test]

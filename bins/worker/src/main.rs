@@ -46,6 +46,7 @@ async fn main() {
     spawn_wallet_setup(pool.clone(), chain.clone(), &stellar);
     spawn_funding(pool.clone(), chain.clone(), &stellar);
     spawn_reconcile(pool.clone(), chain.clone(), &stellar);
+    spawn_fiat(pool.clone(), &config, &stellar);
 
     // Deposits need only the public address.
     eschess_api::stellar_watcher::spawn_watcher(pool.clone(), chain.clone(), stellar.clone());
@@ -120,6 +121,61 @@ async fn main() {
         }
     }
     shutdown().await;
+}
+
+/// Follows players' fiat sessions at the Stellar anchor and makes cash-outs' USDC payments (see `eschess_worker::fiat`). Needs
+/// FIAT_ANCHOR_DOMAIN and WALLET_MASTER_KEY_FILE (the player's own key logs in to the anchor and signs the payment).
+fn spawn_fiat(pool: sqlx::PgPool, config: &Config, stellar: &eschess_api::config::StellarConfig) {
+    use eschess_stellar::custody::{KeyVault, LocalVault};
+    let (Some(fiat_config), Some(master)) =
+        (config.fiat.as_ref(), config.wallet_master_key_file.as_ref())
+    else {
+        tracing::info!(
+            "FIAT_ANCHOR_DOMAIN and WALLET_MASTER_KEY_FILE are not both set: no fiat sessions will be followed by this worker"
+        );
+        return;
+    };
+    let network = Network::parse(&stellar.network).expect("the network was checked by Config");
+    let vault: Arc<dyn KeyVault> = Arc::new(
+        LocalVault::from_file(std::path::Path::new(master.trim()), 1, network)
+            .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}")),
+    );
+    let anchor = eschess_stellar::sep::LazyAnchor::new(
+        &fiat_config.domain,
+        &fiat_config.toml_base,
+        network,
+        (
+            stellar.usdc.code(),
+            stellar.usdc.issuer().unwrap_or_default(),
+        ),
+    );
+    let cfg = eschess_worker::fiat::Config {
+        usdc: stellar.usdc.clone(),
+        hot_account: stellar.hot_account,
+        policy: eschess_storage::withdrawals::Policy {
+            auto_approve_up_to_minor: stellar.withdraw.auto_approve_minor,
+            daily_limit_minor: stellar.withdraw.daily_limit_minor,
+        },
+        min_minor: stellar.withdraw.min_minor,
+        stale_hours: 48,
+        batch: 50,
+    };
+    tracing::info!(
+        "following fiat sessions with the anchor {}",
+        fiat_config.domain
+    );
+    tokio::spawn(async move {
+        loop {
+            match eschess_worker::fiat::tick(&pool, &anchor, vault.clone(), &cfg).await {
+                Ok(r) if r.withdrawals_made + r.completed + r.failed > 0 || r.expired > 0 => {
+                    tracing::info!("fiat: {r:?}")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("fiat round failed (will retry): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
 }
 
 /// Staked games played on Lichess (ADR 0005): makes each game there and reads its result. Does nothing while no staked

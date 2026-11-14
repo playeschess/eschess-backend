@@ -311,6 +311,8 @@ pub struct AnchorTx {
 pub trait Anchor: Send + Sync {
     /// The domain this anchor is reached at.
     fn home_domain(&self) -> &str;
+    /// The anchor's own Stellar accounts, from its `stellar.toml`. A withdrawal's USDC is sent only to one of these.
+    async fn accounts(&self) -> Result<Vec<AccountKey>, SepError>;
     /// Proves we own the player's account (SEP-10) and returns a token for it. Signs the player's key only for a challenge
     /// that passes [`sign_challenge`].
     async fn authenticate(&self, user: &dyn Signer) -> Result<AnchorToken, SepError>;
@@ -332,6 +334,8 @@ pub struct AnchorInfo {
     pub signing_key: AccountKey,
     pub web_auth_endpoint: String,
     pub transfer_server_sep24: String,
+    /// The anchor's own accounts (`ACCOUNTS`): the only places a withdrawal's USDC may be sent.
+    pub accounts: Vec<AccountKey>,
     /// `(code, issuer)` of the assets the anchor lists.
     pub currencies: Vec<(String, Option<String>)>,
 }
@@ -360,6 +364,16 @@ pub fn parse_toml(text: &str, network: Network) -> Result<AnchorInfo, SepError> 
     if !secure(&web_auth_endpoint) || !secure(&transfer_server_sep24) {
         return Err(bad("its endpoints are not https"));
     }
+    let accounts = doc
+        .get("ACCOUNTS")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|g| AccountKey::parse(g).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let currencies = doc
         .get("CURRENCIES")
         .and_then(|v| v.as_array())
@@ -379,6 +393,7 @@ pub fn parse_toml(text: &str, network: Network) -> Result<AnchorInfo, SepError> 
         signing_key,
         web_auth_endpoint,
         transfer_server_sep24,
+        accounts,
         currencies,
     })
 }
@@ -498,6 +513,10 @@ fn refused(body: &serde_json::Value) -> SepError {
 impl Anchor for HttpAnchor {
     fn home_domain(&self) -> &str {
         &self.home_domain
+    }
+
+    async fn accounts(&self) -> Result<Vec<AccountKey>, SepError> {
+        Ok(self.info.accounts.clone())
     }
 
     async fn authenticate(&self, user: &dyn Signer) -> Result<AnchorToken, SepError> {
@@ -641,5 +660,80 @@ impl Anchor for HttpAnchor {
             message: text("message"),
             stellar_transaction_id: text("stellar_transaction_id"),
         })
+    }
+}
+
+/// An anchor that connects the first time it is needed, and tries again next time if that failed. A provider being down when
+/// the platform starts must not switch fiat off until someone restarts it.
+pub struct LazyAnchor {
+    home_domain: String,
+    toml_base: String,
+    network: Network,
+    asset_code: String,
+    asset_issuer: String,
+    connected: tokio::sync::Mutex<Option<std::sync::Arc<HttpAnchor>>>,
+}
+
+impl LazyAnchor {
+    pub fn new(
+        home_domain: &str,
+        toml_base: &str,
+        network: Network,
+        asset: (&str, &str),
+    ) -> LazyAnchor {
+        LazyAnchor {
+            home_domain: home_domain.to_string(),
+            toml_base: toml_base.to_string(),
+            network,
+            asset_code: asset.0.to_string(),
+            asset_issuer: asset.1.to_string(),
+            connected: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn get(&self) -> Result<std::sync::Arc<HttpAnchor>, SepError> {
+        let mut slot = self.connected.lock().await;
+        if let Some(a) = &*slot {
+            return Ok(a.clone());
+        }
+        let a = std::sync::Arc::new(
+            HttpAnchor::connect(
+                &self.home_domain,
+                &self.toml_base,
+                self.network,
+                (&self.asset_code, &self.asset_issuer),
+            )
+            .await?,
+        );
+        *slot = Some(a.clone());
+        Ok(a)
+    }
+}
+
+#[async_trait::async_trait]
+impl Anchor for LazyAnchor {
+    fn home_domain(&self) -> &str {
+        &self.home_domain
+    }
+    async fn accounts(&self) -> Result<Vec<AccountKey>, SepError> {
+        self.get().await?.accounts().await
+    }
+    async fn authenticate(&self, user: &dyn Signer) -> Result<AnchorToken, SepError> {
+        self.get().await?.authenticate(user).await
+    }
+    async fn start(
+        &self,
+        token: &AnchorToken,
+        kind: Kind,
+        asset_code: &str,
+        account: &AccountKey,
+    ) -> Result<Interactive, SepError> {
+        self.get()
+            .await?
+            .start(token, kind, asset_code, account)
+            .await
+    }
+    async fn transaction(&self, token: &AnchorToken, id: &str) -> Result<AnchorTx, SepError> {
+        self.get().await?.transaction(token, id).await
     }
 }

@@ -135,6 +135,20 @@ async fn poll(api: &Api, chain: &FakeChain) -> Stats {
         .expect("a poll succeeds")
 }
 
+/// A round straight after one that failed. The failed round's lock is released a moment later (its dropped transaction rolls
+/// back in the background), so this round can find the lock still held and skip. That is harmless in production, where the next
+/// round does the work; a test that needs the work done waits a moment and asks again.
+async fn poll_after_a_failed_round(api: &Api, chain: &FakeChain) -> Stats {
+    for _ in 0..50 {
+        let stats = poll(api, chain).await;
+        if !stats.skipped {
+            return stats;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("every round was skipped: something else holds the lock");
+}
+
 async fn usdc_balance(api: &Api, token: &str) -> i64 {
     let (_, me) = api.get("/v1/me", token).await;
     me["wallet"]
@@ -424,7 +438,7 @@ async fn the_cursor_survives_failures_and_servers_take_turns(pool: PgPool) {
     );
     *chain.fail.lock().unwrap() = false;
     assert_eq!(
-        poll(&api, &chain).await.credited,
+        poll_after_a_failed_round(&api, &chain).await.credited,
         1,
         "the missed payment is picked up when the network returns"
     );

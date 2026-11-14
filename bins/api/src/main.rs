@@ -74,6 +74,21 @@ async fn main() {
         Arc::new(eschess_lichess::HttpLichess::new(&l.base_url))
             as Arc<dyn eschess_lichess::Lichess>
     });
+    // The Stellar anchor for fiat, if one is configured. It connects the first time it is used.
+    let anchor: Option<Arc<dyn eschess_stellar::sep::Anchor>> =
+        match (config.fiat.as_ref(), config.stellar.as_ref()) {
+            (Some(f), Some(st)) => {
+                let network = eschess_stellar::tx::Network::parse(&st.network)
+                    .expect("the network was checked by Config");
+                Some(Arc::new(eschess_stellar::sep::LazyAnchor::new(
+                    &f.domain,
+                    &f.toml_base,
+                    network,
+                    (st.usdc.code(), st.usdc.issuer().unwrap_or_default()),
+                )) as Arc<dyn eschess_stellar::sep::Anchor>)
+            }
+            _ => None,
+        };
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -82,6 +97,7 @@ async fn main() {
         chain,
         vault,
         lichess,
+        anchor,
     };
     // Listen for game changes made by any server, and push them to the players connected to this one.
     eschess_api::hub::spawn_listener(state.hub.clone(), state.pool.clone());

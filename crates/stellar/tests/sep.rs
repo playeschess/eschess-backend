@@ -388,7 +388,8 @@ async fn a_fee_bump_wrapper_is_refused() {
 
 fn toml(extra: &str) -> String {
     format!(
-        r#"SIGNING_KEY = "{}"
+        r#"SIGNING_KEY = "{0}"
+ACCOUNTS = ["{0}"]
 NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
 WEB_AUTH_ENDPOINT = "https://{WEB_AUTH_DOMAIN}/auth"
 TRANSFER_SERVER_SEP0024 = "https://{DOMAIN}/sep24"
@@ -404,6 +405,7 @@ issuer = "{ISSUER}"
 fn the_toml_is_read_and_a_wrong_one_is_refused() {
     let info = parse_toml(&toml(""), Network::Testnet).unwrap();
     assert_eq!(info.signing_key, account(&key(1)));
+    assert_eq!(info.accounts, vec![account(&key(1))]);
     assert_eq!(
         info.currencies,
         vec![("USDC".to_string(), Some(ISSUER.to_string()))]
