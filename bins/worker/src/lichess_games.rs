@@ -5,11 +5,13 @@
 //! Lichess game is looked at: when it is over the result is recorded once and settlement takes over; a game nobody
 //! started before its challenge expired is a no-show and the stakes come back.
 //!
-//! A result is never guessed. A game Lichess ended for cheating, one with a status this code does not know, one whose
-//! players or variant are not what we asked for, is left alone and logged for a person.
+//! A result is never guessed. Before a result is recorded, the game's moves and clocks are read from Lichess and stored,
+//! so the fair-play scorer can look at the game like any other. A game Lichess ended for cheating opens a review case; one
+//! with a status this code does not know, whose moves cannot be followed, or whose players or variant are not what we asked
+//! for, is left alone and logged for a person.
 
 use eschess_lichess::{GameStatus, Lichess, LichessError, NewChallenge, Side};
-use eschess_storage::{games, lichess_games};
+use eschess_storage::{fairplay, games, lichess_games};
 use sqlx::PgPool;
 
 #[derive(Debug, Clone, Copy)]
@@ -162,6 +164,54 @@ pub async fn tick(
         if !lg.status.is_over() {
             continue;
         }
+        // The game is over. Bring its moves here first, so fair play can look at them: a result is never paid on a game
+        // whose moves we could not follow.
+        if lg.ply > 0 {
+            let moves = match lichess_games::convert_moves(&lg.moves, &lg.clocks_cs, g.increment_ms)
+            {
+                Ok(m) => m,
+                Err(why) => {
+                    tracing::error!(game = %g.id, lichess = %lg.id, "could not follow the Lichess game's moves ({why}); leaving it for a person");
+                    report.held += 1;
+                    continue;
+                }
+            };
+            if let Err(e) = lichess_games::import_moves(pool, g.id, &moves).await {
+                tracing::error!(game = %g.id, "storing the Lichess game's moves failed (will retry): {e}");
+                continue;
+            }
+        }
+        // Lichess ended the game because a player cheated. We do not pay on that alone: it opens a review case against
+        // the player who lost (the other won), the game is recorded as a draw, and a reviewer decides. Confirmed, the
+        // honest player gets the pot; cleared, the stakes come back.
+        if lg.status == GameStatus::Cheat {
+            let cheater = match lg.winner {
+                Some(Side::White) => g.black_user,
+                Some(Side::Black) => g.white_user,
+                None => {
+                    tracing::error!(game = %g.id, lichess = %lg.id, "Lichess ended the game for cheating without a winner; leaving it for a person");
+                    report.held += 1;
+                    continue;
+                }
+            };
+            if let Err(e) = fairplay::record_external_flag(
+                pool,
+                g.id,
+                cheater,
+                "lichess",
+                "Lichess ended this game because the player was found to be cheating",
+            )
+            .await
+            {
+                tracing::error!(game = %g.id, "opening the fair-play case failed (will retry): {e}");
+                continue;
+            }
+            if record(pool, g.id, "draw", "lichess:cheat", lg.ply).await {
+                tracing::warn!(game = %g.id, %cheater, "Lichess ended the game for cheating; a review case is open");
+                report.finished += 1;
+            }
+            continue;
+        }
         match verdict(&lg.status, lg.winner) {
             Some(result) => {
                 if record(
@@ -177,7 +227,7 @@ pub async fn tick(
                 }
             }
             None => {
-                tracing::error!(game = %g.id, lichess = %lg.id, status = ?lg.status, "Lichess game ended in a way that needs a person (cheating, or an unexpected status); stakes stay held");
+                tracing::error!(game = %g.id, lichess = %lg.id, status = ?lg.status, "Lichess game ended in a way that needs a person (an unexpected status); stakes stay held");
                 report.held += 1;
             }
         }

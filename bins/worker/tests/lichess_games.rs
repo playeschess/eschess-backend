@@ -12,15 +12,17 @@ use eschess_lichess::{
     AccessToken, GameStatus, Lichess, LichessAccount, LichessError, LichessGame, NewChallenge,
     OpenChallenge, Side as Winner,
 };
-use eschess_storage::games;
 use eschess_storage::ledger::{balance, post};
 use eschess_storage::stakes::Stake;
 use eschess_storage::stellar::{system_account, user_wallet, CUSTODY_KIND};
+use eschess_storage::{fairplay, games};
 use eschess_worker::lichess_games::{tick, Config, Report};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 const ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+/// A real game (Morphy's Opera Game, 33 plies) to give the fake Lichess legal moves.
+const OPERA: &str = "e4 e5 Nf3 d6 d4 Bg4 dxe5 Bxf3 Qxf3 dxe5 Bc4 Nf6 Qb3 Qe7 Nc3 c6 Bg5 b5 Nxb5 cxb5 Bxb5+ Nbd7 O-O-O Rd8 Rxd7 Rxd7 Rd1 Qe6 Bxd7+ Nxd7 Qb8+ Nxb8 Rd8#";
 const NOW: i64 = 1_800_000_000_000;
 
 fn usdc() -> AssetId {
@@ -53,6 +55,12 @@ impl Fake {
         winner: Option<Winner>,
         ply: i32,
     ) {
+        let moves: Vec<String> = OPERA
+            .split_whitespace()
+            .take(ply as usize)
+            .map(String::from)
+            .collect();
+        assert_eq!(moves.len(), ply as usize, "the fixture game is shorter");
         self.games.lock().unwrap().insert(
             id.to_string(),
             LichessGame {
@@ -60,6 +68,8 @@ impl Fake {
                 status,
                 winner,
                 ply,
+                clocks_cs: vec![30_000; moves.len()],
+                moves,
                 white: Some(white.into()),
                 black: Some(black.into()),
                 variant: "standard".into(),
@@ -215,7 +225,7 @@ async fn a_finished_game_is_recorded_once_and_a_game_still_on_is_left_alone(pool
         "grace",
         GameStatus::Resign,
         Some(Winner::Black),
-        44,
+        30,
     );
     assert_eq!(run(&pool, &f, NOW).await.finished, 1);
     assert_eq!(
@@ -224,7 +234,7 @@ async fn a_finished_game_is_recorded_once_and_a_game_still_on_is_left_alone(pool
             "finished".into(),
             Some("black".into()),
             Some("AbCd1234".into()),
-            44
+            30
         )
     );
     assert_eq!(
@@ -327,18 +337,17 @@ async fn a_game_that_cannot_be_made_on_lichess_is_retried_then_given_up(pool: Pg
 
 #[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
 #[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
-async fn cheating_unknown_endings_and_the_wrong_game_are_left_for_a_person(pool: PgPool) {
+async fn unknown_endings_and_the_wrong_game_are_left_for_a_person(pool: PgPool) {
     let (game, _, _) = started(&pool, "ada", "grace").await;
     let f = Fake::with_ids(&["AbCd1234"]);
     run(&pool, &f, NOW).await;
 
     for (status, winner) in [
-        (GameStatus::Cheat, Some(Winner::White)),
         (GameStatus::UnknownFinish, None),
         (GameStatus::Other("brandNew".into()), None),
         (GameStatus::Resign, None), // a win with no winner is not believable
     ] {
-        f.set("AbCd1234", "ada", "grace", status.clone(), winner, 40);
+        f.set("AbCd1234", "ada", "grace", status.clone(), winner, 30);
         let r = run(&pool, &f, NOW).await;
         assert_eq!(state(&pool, game).await.0, "active", "{status:?}");
         assert_eq!(r.finished, 0, "{status:?}");
@@ -350,7 +359,7 @@ async fn cheating_unknown_endings_and_the_wrong_game_are_left_for_a_person(pool:
         "mallory",
         GameStatus::Resign,
         Some(Winner::White),
-        40,
+        30,
     );
     assert_eq!(run(&pool, &f, NOW).await.held, 1);
     assert_eq!(state(&pool, game).await.0, "active");
@@ -361,7 +370,7 @@ async fn cheating_unknown_endings_and_the_wrong_game_are_left_for_a_person(pool:
         "ada",
         GameStatus::Resign,
         Some(Winner::White),
-        40,
+        30,
     );
     assert_eq!(run(&pool, &f, NOW).await.held, 1);
 }
@@ -379,4 +388,170 @@ async fn a_second_worker_at_the_same_time_does_nothing(pool: PgPool) {
         .unwrap();
     assert!(run(&pool, &f, NOW).await.skipped);
     assert!(f.made.lock().unwrap().is_empty());
+}
+
+async fn count(pool: &PgPool, sql: &str, game: Uuid) -> i64 {
+    sqlx::query_scalar(sql)
+        .bind(game)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_finished_games_moves_are_stored_so_fair_play_can_score_them(pool: PgPool) {
+    let (game, _, _) = started(&pool, "ada", "grace").await;
+    let f = Fake::with_ids(&["AbCd1234"]);
+    run(&pool, &f, NOW).await;
+    f.set(
+        "AbCd1234",
+        "ada",
+        "grace",
+        GameStatus::Mate,
+        Some(Winner::White),
+        33,
+    );
+    assert_eq!(run(&pool, &f, NOW).await.finished, 1);
+
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM game_moves WHERE game_id = $1",
+            game
+        )
+        .await,
+        33
+    );
+    // The scorer's own reader accepts it: consecutive plies, the right player on each, and positions that follow.
+    let record = fairplay::game_record(&pool, game)
+        .await
+        .unwrap()
+        .expect("a finished game");
+    assert_eq!(record.moves.len(), 33);
+    assert_eq!(record.moves[0].uci, "e2e4");
+    assert_eq!(record.moves[32].uci, "d1d8");
+    // The result is only paid once the scorer has run, as for any game.
+    assert_eq!(
+        eschess_storage::stakes::settle(&pool, game, "baseline-1", 0)
+            .await
+            .unwrap(),
+        Err(eschess_storage::stakes::Waiting::NotScored)
+    );
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn moves_that_cannot_be_followed_leave_the_game_for_a_person(pool: PgPool) {
+    let (game, _, _) = started(&pool, "ada", "grace").await;
+    let f = Fake::with_ids(&["AbCd1234"]);
+    run(&pool, &f, NOW).await;
+    f.set(
+        "AbCd1234",
+        "ada",
+        "grace",
+        GameStatus::Mate,
+        Some(Winner::White),
+        33,
+    );
+    f.games.lock().unwrap().get_mut("AbCd1234").unwrap().moves[5] = "Qh7".into(); // not legal there
+    let r = run(&pool, &f, NOW).await;
+    assert_eq!((r.finished, r.held), (0, 1));
+    assert_eq!(state(&pool, game).await.0, "active");
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM game_moves WHERE game_id = $1",
+            game
+        )
+        .await,
+        0,
+        "nothing half-stored"
+    );
+    // Clock readings missing is the same.
+    f.set(
+        "AbCd1234",
+        "ada",
+        "grace",
+        GameStatus::Mate,
+        Some(Winner::White),
+        33,
+    );
+    f.games
+        .lock()
+        .unwrap()
+        .get_mut("AbCd1234")
+        .unwrap()
+        .clocks_cs
+        .clear();
+    assert_eq!(run(&pool, &f, NOW).await.held, 1);
+}
+
+#[sqlx::test(migrator = "eschess_storage::MIGRATOR")]
+#[ignore = "needs DATABASE_URL: run `make dev` then `make test-integration`"]
+async fn a_game_lichess_ended_for_cheating_opens_a_case_and_a_reviewer_decides_the_pot(
+    pool: PgPool,
+) {
+    let (game, ada, grace) = started(&pool, "ada", "grace").await;
+    let f = Fake::with_ids(&["AbCd1234"]);
+    run(&pool, &f, NOW).await;
+    // Lichess says White won because Black was found cheating.
+    f.set(
+        "AbCd1234",
+        "ada",
+        "grace",
+        GameStatus::Cheat,
+        Some(Winner::White),
+        30,
+    );
+    assert_eq!(run(&pool, &f, NOW).await.finished, 1);
+    assert_eq!(run(&pool, &f, NOW).await, Report::default(), "once");
+    // Recorded as a draw, with a case open against the loser, and nothing paid.
+    assert_eq!(state(&pool, game).await.1.as_deref(), Some("draw"));
+    let open: Vec<Uuid> =
+        sqlx::query_scalar("SELECT player_id FROM fairplay_cases WHERE status = 'open'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(open, vec![grace]);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM game_moves WHERE game_id = $1",
+            game
+        )
+        .await,
+        30
+    );
+    // The scorer looks at the game (as for any), the open case holds the pot.
+    sqlx::query(
+        "INSERT INTO fairplay_runs (game_id, scorer, outcome) VALUES ($1, 'baseline-1', 'scored')",
+    )
+    .bind(game)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        eschess_storage::stakes::settle(&pool, game, "baseline-1", 0)
+            .await
+            .unwrap(),
+        Err(eschess_storage::stakes::Waiting::OpenCase)
+    );
+    // A reviewer confirms: the honest player gets the whole pot.
+    let reviewer = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, email, username, password_hash, email_verified_at) VALUES ($1, 'rev@example.com', 'reviewer', 'x', now())")
+        .bind(reviewer).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE fairplay_cases SET status = 'confirmed', decided_by = $1, decided_at = now(), reason = 'Lichess and review agree' WHERE player_id = $2 AND status = 'open'")
+        .bind(reviewer).bind(grace).execute(&pool).await.unwrap();
+    let settled = eschess_storage::stakes::settle(&pool, game, "baseline-1", 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        settled,
+        Ok(eschess_storage::stakes::Settled::Confiscated { to: ada })
+    );
+    assert_eq!(
+        (wallet(&pool, ada).await, wallet(&pool, grace).await),
+        (1_400, 600)
+    );
 }

@@ -6,6 +6,7 @@
 mod fen;
 mod game;
 mod position;
+mod san;
 mod types;
 
 pub use fen::FenError;
