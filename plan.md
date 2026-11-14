@@ -115,11 +115,11 @@ A board, a lobby, a Stake button, a wallet screen, notices ("your stake was held
 
 ### Step 6. Fiat in and out
 
-Status: not started, needs a provider. This is the second way to add and withdraw money; the USDC route (step 3) does not wait for it.
+Status: **built and tested on the testnet** (`docs/adr/0008-fiat-via-anchor.md`). The provider is a setting, not chosen. This is the second way to add and withdraw money; the USDC route (step 3) does not wait for it.
 
-1. Pick a regulated ramp provider (compare fees, countries, ID checks).
-2. Let users pay in their currency and receive USDC on their generated address.
-3. Let users cash out the same way, back to their own currency.
+- Done: a standard Stellar anchor client (SEP-1, SEP-10, SEP-24). Signing the anchor's login with a player's key is allowed only for a challenge of exactly the shape the standard permits (hostile variants tested). Run for real against Stellar's test anchor (login, deposit and cash-out screens open).
+- Done: the API starts a deposit or cash-out for the player's own address; the worker follows each session. A deposit is credited by the deposit watcher as before. A cash-out becomes an ordinary withdrawal to an account the anchor itself lists, so the limits, approvals and fair-play hold apply.
+- Next: a full try on the testnet with the test anchor (`scripts/try-fiat.sh`), then choose a real provider (fees, countries, currencies, a contract), and the web screens.
 
 ### Step 7. Before real money (cannot be skipped)
 

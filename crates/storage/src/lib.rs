@@ -2,6 +2,7 @@
 
 pub mod contract;
 pub mod fairplay;
+pub mod fiat;
 pub mod games;
 pub mod identity;
 pub mod ledger;

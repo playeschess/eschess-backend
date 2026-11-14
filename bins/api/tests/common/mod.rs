@@ -55,6 +55,7 @@ impl Api {
             chain,
             vault: None,
             lichess: None,
+            anchor: None,
         };
         Api {
             app: app(state.clone()),
@@ -165,6 +166,7 @@ impl Api {
             chain: None,
             vault: Some(vault),
             lichess: None,
+            anchor: None,
         };
         Api {
             app: app(state.clone()),
@@ -188,6 +190,32 @@ impl Api {
             chain: None,
             vault: None,
             lichess: Some(lichess),
+            anchor: None,
+        };
+        Api {
+            app: app(state.clone()),
+            pool,
+            state,
+            tasks: Default::default(),
+        }
+    }
+
+    /// With a master key, Stellar configured, and a (fake) anchor, for the fiat routes.
+    pub fn with_anchor(
+        pool: PgPool,
+        vault: Arc<dyn eschess_stellar::custody::KeyVault>,
+        config: Config,
+        anchor: Arc<dyn eschess_stellar::sep::Anchor>,
+    ) -> Api {
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(config),
+            mailer: Arc::new(CapturingMailer::default()),
+            hub: eschess_api::hub::Hub::new(),
+            chain: None,
+            vault: Some(vault),
+            lichess: None,
+            anchor: Some(anchor),
         };
         Api {
             app: app(state.clone()),

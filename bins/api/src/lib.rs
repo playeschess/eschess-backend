@@ -30,6 +30,8 @@ pub struct AppState {
     pub vault: Option<Arc<dyn eschess_stellar::custody::KeyVault>>,
     /// Lichess login, to link a player's Lichess account (ADR 0005). `None` while `config.lichess` is off.
     pub lichess: Option<Arc<dyn eschess_lichess::Lichess>>,
+    /// The Stellar anchor that turns players' own currency into USDC and back (SEP-24). `None` while `config.fiat` is off.
+    pub anchor: Option<Arc<dyn eschess_stellar::sep::Anchor>>,
 }
 
 /// The API's routes. Kept separate from `main` so tests can call it without opening a network port.
@@ -68,6 +70,13 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/lichess", get(routes::lichess::status))
         .route("/v1/lichess/link/start", post(routes::lichess::start))
         .route("/v1/lichess/link/finish", post(routes::lichess::finish))
+        .route("/v1/wallet/fiat", get(routes::fiat::overview))
+        .route("/v1/wallet/fiat/deposit", post(routes::fiat::start_deposit))
+        .route(
+            "/v1/wallet/fiat/withdraw",
+            post(routes::fiat::start_withdraw),
+        )
+        .route("/v1/wallet/fiat/{id}", get(routes::fiat::get))
         .route("/v1/wallet/deposit-info", get(routes::wallet::deposit_info))
         .route("/v1/wallet/deposits", get(routes::wallet::deposits))
         .route(
@@ -182,6 +191,7 @@ mod tests {
             chain: None,
             vault: None,
             lichess: None,
+            anchor: None,
         }
     }
 

@@ -40,6 +40,7 @@ impl Api {
                 chain: None,
                 vault: None,
                 lichess: None,
+                anchor: None,
             }),
             pool,
             mailer,

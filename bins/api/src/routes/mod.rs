@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod fairplay;
+pub mod fiat;
 pub mod games;
 pub mod lichess;
 pub mod matchmaking;
