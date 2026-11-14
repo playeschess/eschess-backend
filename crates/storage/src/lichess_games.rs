@@ -134,7 +134,10 @@ pub fn convert_moves(
     increment_ms: i64,
 ) -> Result<Vec<ImportedMove>, String> {
     use eschess_domain::chess::Position;
-    if clocks_cs.len() != sans.len() {
+    // Lichess gives one reading per move, and for a game that did not end in mate one more at the end: the clock of the side
+    // that was to move when the game stopped. That last reading belongs to no move, so it is ignored. (Seen in real games:
+    // every resignation, timeout and agreed draw has it; a mate does not.) Any other difference is an error.
+    if clocks_cs.len() != sans.len() && clocks_cs.len() != sans.len() + 1 {
         return Err(format!(
             "{} moves but {} clock readings",
             sans.len(),
@@ -246,6 +249,25 @@ mod tests {
         assert!(m[0]
             .fen_after
             .starts_with("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b"));
+    }
+
+    #[test]
+    fn the_extra_final_clock_reading_of_an_unfinished_by_mate_game_is_ignored() {
+        // Real Lichess games that end by resignation, timeout or agreement carry one reading more than there are moves.
+        let with = convert_moves(
+            &sans("e4 e5 Nf3 Nc6"),
+            &[30_000, 30_000, 29_800, 30_100, 29_000],
+            3_000,
+        )
+        .unwrap();
+        let without = convert_moves(
+            &sans("e4 e5 Nf3 Nc6"),
+            &[30_000, 30_000, 29_800, 30_100],
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(with, without);
+        assert_eq!(with.len(), 4);
     }
 
     #[test]

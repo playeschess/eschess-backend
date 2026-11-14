@@ -202,7 +202,8 @@ pub struct LichessGame {
     /// The moves in standard algebraic notation (`e4`, `Nbd7`, `O-O`), in order.
     pub moves: Vec<String>,
     /// What each mover's clock showed after each move, in centiseconds (`clocks[i]` is after `moves[i]`). Empty when Lichess
-    /// gave none.
+    /// gave none. A game that did not end in mate carries one reading more than there are moves (the clock of the side to
+    /// move at the end); it belongs to no move.
     pub clocks_cs: Vec<i64>,
     /// Lowercase Lichess ids of the two players; `None` for an anonymous player or the computer.
     pub white: Option<String>,
