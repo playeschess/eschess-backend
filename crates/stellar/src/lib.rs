@@ -16,6 +16,7 @@ pub mod custody;
 pub mod deposit;
 pub mod escrow;
 pub mod horizon;
+pub mod sep;
 pub mod signer;
 pub mod soroban;
 pub mod tx;
