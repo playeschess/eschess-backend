@@ -140,15 +140,9 @@ fn spawn_fiat(pool: sqlx::PgPool, config: &Config, stellar: &eschess_api::config
         LocalVault::from_file(std::path::Path::new(master.trim()), 1, network)
             .unwrap_or_else(|e| panic!("WALLET_MASTER_KEY_FILE: {e}")),
     );
-    let anchor = eschess_stellar::sep::LazyAnchor::new(
-        &fiat_config.domain,
-        &fiat_config.toml_base,
-        network,
-        (
-            stellar.usdc.code(),
-            stellar.usdc.issuer().unwrap_or_default(),
-        ),
-    );
+    let anchor = fiat_config
+        .anchor(stellar)
+        .unwrap_or_else(|e| panic!("fiat anchor: {e}"));
     let cfg = eschess_worker::fiat::Config {
         usdc: stellar.usdc.clone(),
         hot_account: stellar.hot_account,

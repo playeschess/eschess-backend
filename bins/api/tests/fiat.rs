@@ -82,6 +82,8 @@ fn config() -> Config {
         fiat: Some(FiatConfig {
             domain: "anchor.example".into(),
             toml_base: "https://anchor.example".into(),
+            client_domain: None,
+            anchor_accounts: vec![],
         }),
         ..Config::default()
     }

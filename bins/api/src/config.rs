@@ -51,6 +51,40 @@ pub struct FiatConfig {
     pub domain: String,
     /// Where that `stellar.toml` is read from: `https://<domain>` unless a stand-in server is named.
     pub toml_base: String,
+    /// Our own domain for SEP-10 logins, and the file holding the key its `stellar.toml` names. Some anchors (MoneyGram) only
+    /// let in allowlisted wallet domains. The key holds no money and signs nothing but these logins. Testnet only: a local key
+    /// file is refused for the public network.
+    pub client_domain: Option<(String, String)>,
+    /// The anchor's accounts, pinned by us after the anchor has named them in writing. When set, a cash-out may go only to these,
+    /// whatever the anchor's `stellar.toml` says (MoneyGram's lists none).
+    pub anchor_accounts: Vec<eschess_domain::stellar::AccountKey>,
+}
+
+impl FiatConfig {
+    /// The anchor this configuration names. It connects the first time it is used.
+    pub fn anchor(&self, st: &StellarConfig) -> Result<eschess_stellar::sep::LazyAnchor, String> {
+        let network = eschess_stellar::tx::Network::parse(&st.network)
+            .ok_or("the Stellar network is not one we know")?;
+        let mut anchor = eschess_stellar::sep::LazyAnchor::new(
+            &self.domain,
+            &self.toml_base,
+            network,
+            (st.usdc.code(), st.usdc.issuer().unwrap_or_default()),
+        )
+        .with_pinned_accounts(self.anchor_accounts.clone());
+        if let Some((domain, key_file)) = &self.client_domain {
+            let signer = eschess_stellar::signer::LocalSigner::from_file(
+                std::path::Path::new(key_file),
+                network,
+            )
+            .map_err(|e| format!("FIAT_CLIENT_DOMAIN_KEY_FILE: {e}"))?;
+            anchor = anchor.with_client_domain(eschess_stellar::sep::ClientDomain {
+                domain: domain.clone(),
+                signer: std::sync::Arc::new(signer),
+            });
+        }
+        Ok(anchor)
+    }
 }
 
 fn fiat_from(
@@ -82,7 +116,40 @@ fn fiat_from(
     {
         return Err("FIAT_ANCHOR_URL must be an https:// address".into());
     }
-    Ok(Some(FiatConfig { domain, toml_base }))
+    let client_domain = match (
+        get("FIAT_CLIENT_DOMAIN")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        get("FIAT_CLIENT_DOMAIN_KEY_FILE")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    ) {
+        (None, None) => None,
+        (Some(d), Some(k)) if !d.contains('/') && !d.contains(' ') => Some((d, k)),
+        (Some(_), Some(_)) => {
+            return Err(
+                "FIAT_CLIENT_DOMAIN is a domain such as wallet.example, without https:// or a path"
+                    .into(),
+            )
+        }
+        _ => return Err("FIAT_CLIENT_DOMAIN and FIAT_CLIENT_DOMAIN_KEY_FILE go together".into()),
+    };
+    let mut anchor_accounts = Vec::new();
+    if let Some(list) = get("FIAT_ANCHOR_ACCOUNTS").filter(|v| !v.trim().is_empty()) {
+        for g in list.split(',') {
+            let key = eschess_domain::stellar::AccountKey::parse(g.trim())
+                .map_err(|e| format!("FIAT_ANCHOR_ACCOUNTS: {g:?}: {e}"))?;
+            if !anchor_accounts.contains(&key) {
+                anchor_accounts.push(key);
+            }
+        }
+    }
+    Ok(Some(FiatConfig {
+        domain,
+        toml_base,
+        client_domain,
+        anchor_accounts,
+    }))
 }
 
 /// Lichess login settings.
@@ -496,6 +563,47 @@ mod tests {
             ("FIAT_ANCHOR_URL", "http://127.0.0.1:9000")
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn the_domain_login_and_pinned_accounts_are_read_and_checked() {
+        let base = [
+            ("STELLAR_HOT_ACCOUNT", HOT),
+            ("FIAT_ANCHOR_DOMAIN", "a.example"),
+        ];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut v = base.to_vec();
+            v.extend_from_slice(extra);
+            load(&v)
+        };
+        let f = with(
+            &[
+                ("FIAT_CLIENT_DOMAIN", "wallet.example"),
+                ("FIAT_CLIENT_DOMAIN_KEY_FILE", "/k"),
+                ("FIAT_ANCHOR_ACCOUNTS", &format!("{HOT}, {HOT}")),
+            ]
+            .map(|(k, v)| (k, Box::leak(v.to_string().into_boxed_str()) as &'static str)),
+        )
+        .unwrap()
+        .fiat
+        .unwrap();
+        assert_eq!(
+            f.client_domain,
+            Some(("wallet.example".to_string(), "/k".to_string()))
+        );
+        assert_eq!(f.anchor_accounts.len(), 1, "a repeated account counts once");
+        assert!(
+            with(&[("FIAT_CLIENT_DOMAIN", "wallet.example")]).is_err(),
+            "the domain needs its key file"
+        );
+        assert!(with(&[("FIAT_CLIENT_DOMAIN_KEY_FILE", "/k")]).is_err());
+        assert!(with(&[
+            ("FIAT_CLIENT_DOMAIN", "https://wallet.example"),
+            ("FIAT_CLIENT_DOMAIN_KEY_FILE", "/k")
+        ])
+        .is_err());
+        assert!(with(&[("FIAT_ANCHOR_ACCOUNTS", "not-an-account")]).is_err());
+        assert!(with(&[]).unwrap().fiat.unwrap().client_domain.is_none());
     }
 
     #[test]
