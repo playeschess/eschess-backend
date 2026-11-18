@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use ed25519_dalek::{Signer as _, SigningKey};
 use eschess_domain::stellar::AccountKey;
 use eschess_stellar::sep::{
-    parse_toml, sign_challenge, Anchor, AnchorStatus, ChallengeContext, HttpAnchor, Kind, SepError,
+    parse_toml, sign_challenge, Anchor, AnchorStatus, ChallengeContext, ClientDomain, HttpAnchor,
+    Kind, SepError,
 };
 use eschess_stellar::signer::{SignError, Signer};
 use eschess_stellar::tx::Network;
@@ -79,6 +80,7 @@ struct Make {
     max: u64,
     web_auth_domain: String,
     extra: Option<(String, AccountKey)>,
+    extra_value: Vec<u8>,
     payment: bool,
     no_signature: bool,
 }
@@ -99,6 +101,7 @@ impl Make {
             max: now() + 300,
             web_auth_domain: WEB_AUTH_DOMAIN.into(),
             extra: None,
+            extra_value: b"v".to_vec(),
             payment: false,
             no_signature: false,
         }
@@ -124,7 +127,7 @@ impl Make {
             ),
         ];
         if let Some((name, src)) = &self.extra {
-            ops.push(Make::data(*src, name, b"v"));
+            ops.push(Make::data(*src, name, &self.extra_value));
         }
         if self.payment {
             ops.push(Operation {
@@ -181,6 +184,7 @@ fn ctx() -> ChallengeContext<'static> {
         anchor_key: account(&key(1)),
         network: Network::Testnet,
         now: now(),
+        client_domain: None,
     }
 }
 
@@ -489,6 +493,8 @@ fn body_of(req: &str) -> serde_json::Value {
 /// What a stand-in anchor does wrong, if anything.
 #[derive(Clone, Copy, Default)]
 struct Fault {
+    /// It only lets in wallets that log in with the domain `wallet.example` (SEP-10 `client_domain`).
+    needs_client_domain: bool,
     /// Its login challenge also asks the player to pay someone.
     hostile_challenge: bool,
     /// Its screen is on plain http.
@@ -520,11 +526,18 @@ fn anchor(base: &str, fault: Fault) -> Answer {
                 .next()
                 .unwrap();
             assert!(line.contains(&format!("home_domain={DOMAIN}")), "{line}");
-            let m = Make {
+            let mut m = Make {
                 web_auth_domain: host.clone(),
                 payment: fault.hostile_challenge,
                 ..Make::valid(AccountKey::parse(acct).unwrap())
             };
+            if fault.needs_client_domain {
+                if !line.contains("client_domain=wallet.example") {
+                    return (400, r#"{"error":"client_domain is required"}"#.into());
+                }
+                m.extra = Some(("client_domain".into(), account(&key(20))));
+                m.extra_value = b"wallet.example".to_vec();
+            }
             (200, serde_json::json!({ "transaction": m.xdr(), "network_passphrase": Network::Testnet.passphrase() }).to_string())
         } else if line.starts_with("POST /auth") {
             let signed = body_of(req)["transaction"].as_str().unwrap().to_string();
@@ -533,10 +546,11 @@ fn anchor(base: &str, fault: Fault) -> Answer {
             else {
                 panic!()
             };
+            let want = if fault.needs_client_domain { 3 } else { 2 };
             assert_eq!(
                 env.signatures.len(),
-                2,
-                "the anchor checks it came back signed by the player"
+                want,
+                "the anchor checks it came back signed by the player (and our domain)"
             );
             (200, r#"{"token":"jwt-secret-value"}"#.into())
         } else if line.starts_with("POST /sep24/transactions/deposit/interactive")
@@ -685,4 +699,156 @@ async fn an_anchor_for_another_issuers_usdc_is_not_connected() {
         HttpAnchor::connect(DOMAIN, &base, Network::Testnet, ("EURC", ISSUER)).await,
         Err(SepError::Toml(_))
     ));
+}
+
+/// A domain key that counts how many times it signed.
+fn our_domain() -> (ClientDomain, Arc<Player>) {
+    let signer = Arc::new(Player::new(20));
+    (
+        ClientDomain {
+            domain: "wallet.example".into(),
+            signer: signer.clone(),
+        },
+        signer,
+    )
+}
+
+fn domain_challenge(player: &Player, edit: impl FnOnce(&mut Make)) -> String {
+    let mut m = Make::valid(player.public_key());
+    m.extra = Some(("client_domain".into(), account(&key(20))));
+    m.extra_value = b"wallet.example".to_vec();
+    edit(&mut m);
+    m.xdr()
+}
+
+#[tokio::test]
+async fn a_login_with_our_own_domain_is_signed_by_the_player_and_by_our_domain_only_as_asked() {
+    let (domain, domain_key) = our_domain();
+    let player = Player::new(5);
+    let mut c = ctx();
+    c.client_domain = Some(&domain);
+
+    let signed = sign_challenge(&domain_challenge(&player, |_| {}), &c, &player)
+        .await
+        .unwrap();
+    assert_eq!((player.signatures(), domain_key.signatures()), (1, 1));
+    let TransactionEnvelope::Tx(env) =
+        TransactionEnvelope::from_xdr_base64(&signed, Limits::none()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        env.signatures.len(),
+        3,
+        "the anchor's, the player's and our domain's"
+    );
+    let hash = env.tx.hash(Network::Testnet.id()).unwrap();
+    let bytes = |pk: AccountKey| -> ed25519_dalek::Signature {
+        let s = env
+            .signatures
+            .iter()
+            .find(|s| s.hint.0 == pk.0[28..])
+            .expect("a signature for that key");
+        ed25519_dalek::Signature::from_bytes(
+            &<[u8; 64]>::try_from(s.signature.0.as_slice()).unwrap(),
+        )
+    };
+    key(5)
+        .verifying_key()
+        .verify_strict(&hash, &bytes(account(&key(5))))
+        .unwrap();
+    key(20)
+        .verifying_key()
+        .verify_strict(&hash, &bytes(account(&key(20))))
+        .unwrap();
+
+    // Not configured: the same challenge is refused and nothing is signed.
+    let fresh = Player::new(5);
+    assert!(matches!(
+        sign_challenge(&domain_challenge(&fresh, |_| {}), &ctx(), &fresh).await,
+        Err(SepError::Challenge(_))
+    ));
+    assert_eq!(fresh.signatures(), 0);
+}
+
+#[tokio::test]
+async fn a_domain_login_that_is_not_ours_is_refused_before_any_key_is_used() {
+    let (domain, domain_key) = our_domain();
+    let player = Player::new(5);
+    let mut c = ctx();
+    c.client_domain = Some(&domain);
+    let bad: Vec<(&str, Box<dyn FnOnce(&mut Make)>)> = vec![
+        (
+            "another domain",
+            Box::new(|m: &mut Make| m.extra_value = b"evil.example".to_vec()),
+        ),
+        (
+            "signed for by someone else's key",
+            Box::new(|m: &mut Make| m.extra = Some(("client_domain".into(), account(&key(21))))),
+        ),
+        (
+            "by the player's own account",
+            Box::new({
+                let a = player.public_key();
+                move |m: &mut Make| m.extra = Some(("client_domain".into(), a))
+            }),
+        ),
+    ];
+    for (why, edit) in bad {
+        assert!(
+            matches!(
+                sign_challenge(&domain_challenge(&player, edit), &c, &player).await,
+                Err(SepError::Challenge(_))
+            ),
+            "{why}"
+        );
+    }
+    assert_eq!(
+        (player.signatures(), domain_key.signatures()),
+        (0, 0),
+        "no key was used"
+    );
+}
+
+#[tokio::test]
+async fn an_anchor_that_needs_our_domain_gets_it_and_one_that_does_not_is_unaffected() {
+    let (base, _) = serve(|b| {
+        anchor(
+            b,
+            Fault {
+                needs_client_domain: true,
+                ..Fault::default()
+            },
+        )
+    })
+    .await;
+    let player = Player::new(5);
+    // Without a domain the anchor says it is required.
+    let a = connect(&base).await.unwrap();
+    assert!(
+        matches!(a.authenticate(&player).await, Err(SepError::Rejected(m)) if m.contains("client_domain"))
+    );
+    // With one, the login works and both our keys signed once.
+    let (domain, domain_key) = our_domain();
+    let a = connect(&base).await.unwrap().with_client_domain(domain);
+    let fresh = Player::new(5);
+    a.authenticate(&fresh).await.unwrap();
+    assert_eq!((fresh.signatures(), domain_key.signatures()), (1, 1));
+}
+
+#[tokio::test]
+async fn pinned_accounts_replace_the_anchors_own_list() {
+    let (base, _) = serve(|b| anchor(b, Fault::default())).await;
+    let a = connect(&base).await.unwrap();
+    assert_eq!(
+        a.accounts().await.unwrap(),
+        vec![account(&key(1))],
+        "the file's list by default"
+    );
+    let pinned = vec![account(&key(30))];
+    let a = connect(&base)
+        .await
+        .unwrap()
+        .with_pinned_accounts(pinned.clone());
+    assert_eq!(a.accounts().await.unwrap(), pinned);
 }

@@ -65,6 +65,16 @@ pub struct ChallengeContext<'a> {
     pub network: Network,
     /// Unix seconds.
     pub now: u64,
+    /// Our own domain and its signing key, if we log in with one (SEP-10 `client_domain`). Some anchors, MoneyGram among
+    /// them, only let in wallets whose domain they have allowlisted. The key signs nothing but these challenges.
+    pub client_domain: Option<&'a ClientDomain>,
+}
+
+/// The platform's own domain for SEP-10 logins, and the key its `stellar.toml` (`SIGNING_KEY`) names.
+#[derive(Clone)]
+pub struct ClientDomain {
+    pub domain: String,
+    pub signer: std::sync::Arc<dyn Signer>,
 }
 
 /// Checks a SEP-10 challenge and, only if it is exactly what the standard allows, signs it with `client` and returns the
@@ -101,6 +111,7 @@ pub async fn sign_challenge(
         _ => return refuse("no time bounds"),
     }
 
+    let mut has_client_domain = false;
     // Only data entries. The first is the client's, "<home domain> auth"; the rest are the anchor's.
     let ops = tx.operations.as_slice();
     if ops.is_empty() {
@@ -128,7 +139,7 @@ pub async fn sign_challenge(
                 return refuse("the first operation has no 64-byte nonce");
             }
         } else {
-            if source != ctx.anchor_key.0 {
+            if source != ctx.anchor_key.0 && name != "client_domain" {
                 return refuse("a later operation not from the anchor");
             }
             if name == "web_auth_domain" {
@@ -136,7 +147,17 @@ pub async fn sign_challenge(
                     return refuse("the web auth domain is not the anchor's");
                 }
             } else if name == "client_domain" {
-                return refuse("a client domain, which this integration does not use");
+                // Allowed only if we asked for it: from our own domain's key, naming our own domain.
+                let Some(cd) = ctx.client_domain else {
+                    return refuse("a client domain we did not ask for");
+                };
+                if source != cd.signer.public_key().0 {
+                    return refuse("the client domain operation is not from our domain's key");
+                }
+                if value.as_deref() != Some(cd.domain.as_bytes()) {
+                    return refuse("the client domain is not ours");
+                }
+                has_client_domain = true;
             }
         }
     }
@@ -161,22 +182,35 @@ pub async fn sign_challenge(
         return refuse("not signed by the anchor");
     }
 
-    // Everything checks out: sign, once, with the player's key.
+    // Everything checks out: sign with the player's key, and, if the challenge names our domain, with our domain's key.
     let signature = client
         .sign(&hash)
         .await
         .map_err(|e| SepError::Challenge(format!("signing failed: {e}")))?;
+    let decorated =
+        |key: &AccountKey, signature: [u8; 64]| -> Result<DecoratedSignature, SepError> {
+            Ok(DecoratedSignature {
+                hint: SignatureHint(key.0[28..].try_into().expect("four bytes")),
+                signature: Signature(
+                    signature
+                        .to_vec()
+                        .try_into()
+                        .map_err(|_| SepError::Challenge("signature size".into()))?,
+                ),
+            })
+        };
     let mut env = env;
     let mut sigs = env.signatures.to_vec();
-    sigs.push(DecoratedSignature {
-        hint: SignatureHint(client_key.0[28..].try_into().expect("four bytes")),
-        signature: Signature(
-            signature
-                .to_vec()
-                .try_into()
-                .map_err(|_| SepError::Challenge("signature size".into()))?,
-        ),
-    });
+    sigs.push(decorated(&client_key, signature)?);
+    if has_client_domain {
+        let cd = ctx.client_domain.expect("checked above");
+        let domain_signature = cd
+            .signer
+            .sign(&hash)
+            .await
+            .map_err(|e| SepError::Challenge(format!("signing for our domain failed: {e}")))?;
+        sigs.push(decorated(&cd.signer.public_key(), domain_signature)?);
+    }
     env.signatures = sigs
         .try_into()
         .map_err(|_| SepError::Challenge("too many signatures".into()))?;
@@ -406,6 +440,9 @@ pub struct HttpAnchor {
     network: Network,
     http: reqwest::Client,
     clock: fn() -> u64,
+    client_domain: Option<ClientDomain>,
+    /// Accounts the operator has pinned: when set, a cash-out may go only to one of these, whatever the anchor's file says.
+    pinned_accounts: Vec<AccountKey>,
 }
 
 fn now_secs() -> u64 {
@@ -480,7 +517,22 @@ impl HttpAnchor {
             network,
             http,
             clock: now_secs,
+            client_domain: None,
+            pinned_accounts: Vec::new(),
         })
+    }
+
+    /// Log in to the anchor with our own domain (SEP-10 `client_domain`), for anchors that allowlist wallet domains.
+    pub fn with_client_domain(mut self, domain: ClientDomain) -> HttpAnchor {
+        self.client_domain = Some(domain);
+        self
+    }
+
+    /// Pins the anchor's accounts ourselves. For an anchor whose `stellar.toml` lists none (MoneyGram's lists none), after the
+    /// anchor has told us in writing which accounts it pays withdrawals to. When set, these replace the file's list.
+    pub fn with_pinned_accounts(mut self, accounts: Vec<AccountKey>) -> HttpAnchor {
+        self.pinned_accounts = accounts;
+        self
     }
 
     fn sep24(&self, path: &str) -> String {
@@ -516,18 +568,27 @@ impl Anchor for HttpAnchor {
     }
 
     async fn accounts(&self) -> Result<Vec<AccountKey>, SepError> {
-        Ok(self.info.accounts.clone())
+        Ok(if self.pinned_accounts.is_empty() {
+            self.info.accounts.clone()
+        } else {
+            self.pinned_accounts.clone()
+        })
     }
 
     async fn authenticate(&self, user: &dyn Signer) -> Result<AnchorToken, SepError> {
         let account = user.public_key().to_g();
+        let mut query = vec![
+            ("account", account.as_str()),
+            ("home_domain", self.home_domain.as_str()),
+        ];
+        // An anchor that allowlists wallet domains is told ours, and then wants it signed for (see [`ClientDomain`]).
+        if let Some(cd) = &self.client_domain {
+            query.push(("client_domain", cd.domain.as_str()));
+        }
         let res = self
             .http
             .get(&self.info.web_auth_endpoint)
-            .query(&[
-                ("account", account.as_str()),
-                ("home_domain", self.home_domain.as_str()),
-            ])
+            .query(&query)
             .send()
             .await
             .map_err(unavailable)?;
@@ -556,6 +617,7 @@ impl Anchor for HttpAnchor {
             anchor_key: self.info.signing_key,
             network: self.network,
             now: (self.clock)(),
+            client_domain: self.client_domain.as_ref(),
         };
         let signed = sign_challenge(challenge, &ctx, user).await?;
         let res = self
@@ -671,6 +733,8 @@ pub struct LazyAnchor {
     network: Network,
     asset_code: String,
     asset_issuer: String,
+    client_domain: Option<ClientDomain>,
+    pinned_accounts: Vec<AccountKey>,
     connected: tokio::sync::Mutex<Option<std::sync::Arc<HttpAnchor>>>,
 }
 
@@ -687,8 +751,22 @@ impl LazyAnchor {
             network,
             asset_code: asset.0.to_string(),
             asset_issuer: asset.1.to_string(),
+            client_domain: None,
+            pinned_accounts: Vec::new(),
             connected: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Log in with our own domain (see [`HttpAnchor::with_client_domain`]).
+    pub fn with_client_domain(mut self, domain: ClientDomain) -> LazyAnchor {
+        self.client_domain = Some(domain);
+        self
+    }
+
+    /// Pin the anchor's accounts ourselves (see [`HttpAnchor::with_pinned_accounts`]).
+    pub fn with_pinned_accounts(mut self, accounts: Vec<AccountKey>) -> LazyAnchor {
+        self.pinned_accounts = accounts;
+        self
     }
 
     async fn get(&self) -> Result<std::sync::Arc<HttpAnchor>, SepError> {
@@ -696,15 +774,18 @@ impl LazyAnchor {
         if let Some(a) = &*slot {
             return Ok(a.clone());
         }
-        let a = std::sync::Arc::new(
-            HttpAnchor::connect(
-                &self.home_domain,
-                &self.toml_base,
-                self.network,
-                (&self.asset_code, &self.asset_issuer),
-            )
-            .await?,
-        );
+        let mut anchor = HttpAnchor::connect(
+            &self.home_domain,
+            &self.toml_base,
+            self.network,
+            (&self.asset_code, &self.asset_issuer),
+        )
+        .await?
+        .with_pinned_accounts(self.pinned_accounts.clone());
+        if let Some(cd) = &self.client_domain {
+            anchor = anchor.with_client_domain(cd.clone());
+        }
+        let a = std::sync::Arc::new(anchor);
         *slot = Some(a.clone());
         Ok(a)
     }
