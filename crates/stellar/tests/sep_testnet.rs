@@ -27,9 +27,12 @@ impl Signer for Throwaway {
 #[tokio::test]
 #[ignore = "needs the network"]
 async fn the_real_test_anchor_logs_us_in_and_opens_its_screens() {
+    // Stellar's own test anchor unless SEP_TEST_DOMAIN names another (for example extstellar.moneygram.com).
+    let domain =
+        std::env::var("SEP_TEST_DOMAIN").unwrap_or_else(|_| "testanchor.stellar.org".into());
     let anchor = HttpAnchor::connect(
-        "testanchor.stellar.org",
-        "https://testanchor.stellar.org",
+        &domain,
+        &format!("https://{domain}"),
         Network::Testnet,
         ("USDC", ISSUER),
     )

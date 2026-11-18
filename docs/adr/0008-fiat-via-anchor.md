@@ -35,6 +35,26 @@ Stellar account) and SEP-1 (the company's `stellar.toml`, which names its keys a
 - **The anchor gives up.** A cash-out payment still waiting is cancelled and the money goes back.
 - **Flooding.** At most three open sessions per player.
 
+## Providers looked at (2026-11-18)
+
+Nothing here is a commitment, and every point needs the provider's confirmation.
+
+- **MoneyGram Ramps.** Real and documented: public `stellar.toml` (SEP-24, USDC), and a test environment (`extstellar.moneygram.com`) that uses
+  the same testnet USDC issuer we do. Cash in and cash out at agent locations, not bank or card. Findings from trying our client on its test
+  environment:
+  - It requires `client_domain` in the SEP-10 login (the wallet's own domain, with a `SIGNING_KEY` in that domain's `stellar.toml`) and
+    allowlists wallet domains by email. Our client refuses `client_domain` today; supporting it means the platform needs a domain and a
+    dedicated signing key (one that holds no money), and a small change to the challenge check.
+  - Its `stellar.toml` lists no `ACCOUNTS`, so our rule "send a cash-out only to an account the anchor's `stellar.toml` lists" would refuse
+    every cash-out. We would pin the anchor's accounts ourselves in configuration, after MoneyGram tells us them in writing.
+  - Its documentation page is marked deprecated, and the production-preview limits it states are small (10 to 20 USDC per transaction,
+    100 USDC in total). Nigeria appears in its bank and wallet coverage list, but whether that covers Ramps is not shown.
+- **Paychant.** Announced a SEP-24 integration for Nigeria, Ghana, Kenya and Uganda (the announcement is old). No public `stellar.toml` was found:
+  the likely host `stellar.paychant.com` answers with a certificate error (HTTP 526) today. Needs a conversation to learn whether it is live.
+- **Paycrest.** Not SEP-24 and no Stellar network found in its documentation; would be a separate integration and would need USDC moved
+  to a chain it supports.
+- **Cowrie.** Has a `stellar.toml` mentioning the naira but no SEP-24.
+
 ## What is not decided
 
 - **Which provider, and which countries and currencies.** The company is a setting (`FIAT_ANCHOR_DOMAIN`); nothing in the code names one.
